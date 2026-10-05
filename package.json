@@ -1,0 +1,34 @@
+{
+  "name": "opencode-team-plugin",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Agent-to-agent messaging and session inspection for OpenCode, plus a /sid TUI command",
+  "main": "index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./tui": "./tui.tsx"
+  },
+  "scripts": {
+    "typecheck": "bun x tsc"
+  },
+  "dependencies": {
+    "@opencode/client": "latest",
+    "@opencode/plugin": "latest"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.11"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jabr/opencode-team-plugin.git"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "agents",
+    "multi-agent",
+    "messaging",
+    "tui"
+  ]
+}
