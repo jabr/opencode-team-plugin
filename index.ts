@@ -151,10 +151,10 @@ export default Plugin.define({
         description:
           "Send a message to another agent session in this project. " +
           "The message is delivered to the target model as durable input. " +
-          "Default delivery queues it for after the target finishes its current turn (waking idle sessions). " +
-          "`steer` injects it at the target's next model call without stopping execution. " +
-          "`interrupt` aborts the target's current execution entirely, then delivers. " +
-          "`park` admits it without waking the target at all (delivered on its next run).",
+          "`mode` selects how: 'queue' (default) delivers after the target finishes its current turn (waking idle sessions); " +
+          "'steer' injects at the target's next model call without stopping execution; " +
+          "'interrupt' aborts the target's current execution entirely, then delivers and starts a fresh run; " +
+          "'park' admits durably without waking the target (delivered on its next run).",
         input: {
           type: "object",
           properties: {
@@ -164,19 +164,14 @@ export default Plugin.define({
                 "Target: a session ID (ses_…), 'parent' (this session's parent), 'siblings' (all other children of this session's parent), or 'children' (all children of this session).",
             },
             text: { type: "string", description: "Message for the receiving model." },
-            steer: {
-              type: "boolean",
-              description: "Inject at the target's next model call instead of queueing for its turn end. Default false.",
-            },
-            interrupt: {
-              type: "boolean",
+            mode: {
+              type: "string",
+              enum: ["queue", "steer", "interrupt", "park"],
               description:
-                "Abort the target's current execution before delivering; the message then starts a fresh run. Use for 'stop what you're doing'. Mutually exclusive with steer.",
-            },
-            park: {
-              type: "boolean",
-              description:
-                "Admit the message durably but do NOT wake the target; it is delivered whenever the target next runs. Mutually exclusive with steer/interrupt.",
+                "Delivery mode. 'queue' (default): after the target's current turn ends, waking idle sessions. " +
+                "'steer': at the target's next model call, without stopping execution. " +
+                "'interrupt': abort the target's run first; the message starts a fresh run (use for 'stop what you're doing'). " +
+                "'park': admit durably but do not wake the target; delivered whenever it next runs.",
             },
           },
           required: ["to", "text"],
@@ -184,21 +179,13 @@ export default Plugin.define({
         },
         options: { namespace: "team", permission: "team_send", codemode: true },
         execute: async (raw, context) => {
-          const { to, text, steer, interrupt, park } = raw as {
+          const { to, text, mode } = raw as {
             to: string
             text: string
-            steer?: boolean
-            interrupt?: boolean
-            park?: boolean
+            mode?: "queue" | "steer" | "interrupt" | "park"
           }
           if (to === context.sessionID) {
             throw new Error("team send: refuses your own session; just reply in turn")
-          }
-          if (park && (steer || interrupt)) {
-            throw new Error("team send: park cannot combine with steer or interrupt")
-          }
-          if (steer && interrupt) {
-            throw new Error("team send: steer and interrupt are mutually exclusive")
           }
 
           const self = await ctx.session.get({ sessionID: context.sessionID })
@@ -238,7 +225,7 @@ export default Plugin.define({
               throw new Error(`team send: refused — "${targetID}" belongs to a different project`)
             }
 
-            if (interrupt) {
+            if (mode === "interrupt") {
               // Aborts the running execution (resume: false = do not restart it).
               // The queued message below then schedules a fresh run.
               await ctx.session.interrupt({ sessionID: targetID, resume: false })
@@ -249,17 +236,22 @@ export default Plugin.define({
               // The wire format delivers this as a plain user turn, so
               // provenance must ride IN the text (see the context hook below).
               text: `[agent-message from ${context.sessionID}]\n${text}`,
-              delivery: steer ? "steer" : "queue",
+              delivery: mode === "steer" ? "steer" : "queue",
               // Park admits durably without scheduling a run.
-              resume: park ? false : undefined,
+              resume: mode === "park" ? false : undefined,
               // Sender attribution: the receiver can reply without discovery.
               metadata: { from: context.sessionID },
             })
             delivered.push(target.title || targetID)
           }
 
-          const mode = steer ? "steer" : interrupt ? "interrupted+queued" : park ? "parked" : "queued"
-          return { content: `delivered (${mode}) to: ${delivered.join(", ") || "(no targets)"}` }
+          const label = {
+            queue: "queued",
+            steer: "steer",
+            interrupt: "interrupted+queued",
+            park: "parked",
+          }[mode ?? "queue"]
+          return { content: `delivered (${label}) to: ${delivered.join(", ") || "(no targets)"}` }
         },
       })
 

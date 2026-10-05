@@ -30,16 +30,6 @@ path:
 }
 ```
 
-A single entry loads **both** halves of the package: the server plugin
-(`.` → `index.ts`) and the TUI plugin (`./tui` → `tui.tsx`, loaded
-automatically by the CLI — no `cli.json` entry needed). Path-based loading
-works too, but then the directory must contain both an `index.*` marker and
-the `tui.tsx` entrypoint side by side (the TUI loader skips configured entries
-that resolve to files).
-
-No build step: the package ships raw TypeScript source and OpenCode resolves
-`@opencode/plugin` and `@opencode/client` at runtime.
-
 ## Tools
 
 ### `team_send`
@@ -56,18 +46,16 @@ delivered to the target model as durable input.
 | `siblings` | all other children of this session's parent |
 | `children` | all children of this session (the parent broadcast) |
 
-**Delivery modes**:
+**Delivery modes** (`mode`):
 
-- **queue** (default) — queued for after the target finishes its current turn,
+- **`queue`** (default) — queued for after the target finishes its current turn,
   waking idle sessions.
-- **`steer: true`** — injected at the target's next model call without stopping
+- **`steer`** — injected at the target's next model call without stopping
   execution.
-- **`interrupt: true`** — aborts the target's current execution entirely, then
+- **`interrupt`** — aborts the target's current execution entirely, then
   delivers; the message starts a fresh run. Use for "stop what you're doing".
-  Mutually exclusive with `steer`.
-- **`park: true`** — admitted durably but does **not** wake the target; it is
-  delivered whenever the target next runs. Mutually exclusive with
-  `steer`/`interrupt`.
+- **`park`** — admitted durably but does **not** wake the target; it is
+  delivered whenever the target next runs.
 
 Sending to your own session is refused.
 
@@ -166,10 +154,6 @@ way on `list`/`read`/`status`/`wait`/`inbox`).
 - OpenCode V2 (the plugin and TUI plugin APIs).
 - The tools are registered `codemode: true` (catalog-only in Code Mode
   sessions), so they cost ~zero context there.
-
-If you extend the TUI half to render JSX, you will additionally need the JSX
-peers (`@opentui/core`, `@opentui/solid`, `solid-js`) — as optional
-`peerDependencies`. Today `tui.tsx` renders none and they are not required.
 
 ## License
 
