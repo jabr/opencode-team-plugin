@@ -60,7 +60,12 @@ function api(): Promise<OpenCodeClient> {
   return loopback
 }
 
-/** Compact renderer for a session message; `null` skips low-signal noise. */
+/**
+ * Compact renderer for a session message; `null` skips low-signal noise.
+ * Synthetic messages are expected to carry the in-text
+ * "[agent-message from …]" frame added at send time; unframed ones (older
+ * history, other producers) render as bare text with no provenance.
+ */
 function describe(message: SessionMessageInfo): string | null {
   switch (message.type) {
     case "user":
@@ -94,6 +99,26 @@ function inboxFacts(item: SessionInboxInfo): { text?: string; from?: string } {
     text: payload.text ? truncate(payload.text) : undefined,
     from: payload.metadata?.from !== undefined ? String(payload.metadata.from) : undefined,
   }
+}
+
+/**
+ * Blocked-but-running detection for status/list rows: a session stuck on a
+ * permission ask or a form is busy yet cannot progress until it is answered.
+ * Both listings are location-wide one-shots keyed by sessionID, so this is
+ * two round trips regardless of row count. Failures degrade to "not
+ * blocked" (null) rather than failing the query — null means "not blocked
+ * or undeterminable". Scoped to the caller's location: cross-project rows
+ * (via the `project` opt-in) always read null.
+ */
+async function blockedMap(client: OpenCodeClient): Promise<Map<string, "permission" | "form">> {
+  const [permissions, forms] = await Promise.all([
+    client.permission.request.list().then((out) => out.data).catch(() => []),
+    client.form.list().then((out) => out.data).catch(() => []),
+  ])
+  const blocked = new Map<string, "permission" | "form">()
+  for (const request of permissions) blocked.set(request.sessionID, "permission")
+  for (const form of forms) if (!blocked.has(form.sessionID)) blocked.set(form.sessionID, "form")
+  return blocked
 }
 
 export default Plugin.define({
@@ -246,7 +271,7 @@ export default Plugin.define({
           "inbox (list a session's pending inbox items; `inboxID` cancels one, 'all' cancels every pending item), " +
           "list (find sessions; children by default, `parent` for siblings, `search` filters by title), " +
           "read (tail a session's messages, `cursor` pages further back and the response returns `next`), " +
-          "status (is a session running; omit sessionID for all running in the scoped project), " +
+          "status (whether a session is running or blocked on a permission ask or form; omit sessionID for all running in the scoped project), " +
           "wait (block until the given session goes idle, bounded by `timeout` seconds).",
         input: {
           type: "object",
@@ -362,12 +387,14 @@ export default Plugin.define({
               order: "desc",
             })
             const running = await client.session.active()
+            const blocked = await blockedMap(client)
             const rows = data.map((session) => ({
               id: session.id,
               title: session.title,
               parent: session.parentID ?? null,
               agent: session.agent,
               running: session.id in running,
+              blocked: blocked.get(session.id) ?? null,
               updated: session.time.updated,
             }))
             return { content: JSON.stringify(rows) }
@@ -424,13 +451,14 @@ export default Plugin.define({
           // status
           if (input.sessionID) {
             const target = await scopedSession("status", input.sessionID, input.project ?? projectID)
-            const running = await client.session.active()
+            const [running, blocked] = await Promise.all([client.session.active(), blockedMap(client)])
             return {
               content: JSON.stringify({
                 id: target.id,
                 title: target.title,
                 agent: target.agent,
                 running: input.sessionID in running,
+                blocked: blocked.get(target.id) ?? null,
               }),
             }
           }
@@ -438,10 +466,15 @@ export default Plugin.define({
             project: input.project ?? projectID,
             limit: 100,
           })
-          const running = await client.session.active()
+          const [running, blocked] = await Promise.all([client.session.active(), blockedMap(client)])
           const rows = data
             .filter((session) => session.id in running)
-            .map((session) => ({ id: session.id, title: session.title, agent: session.agent }))
+            .map((session) => ({
+              id: session.id,
+              title: session.title,
+              agent: session.agent,
+              blocked: blocked.get(session.id) ?? null,
+            }))
           return { content: JSON.stringify(rows) }
         },
       })

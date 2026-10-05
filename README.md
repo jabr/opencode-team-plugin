@@ -2,8 +2,10 @@
 
 Agent-to-agent messaging for [OpenCode](https://opencode.ai) V2. One plugin
 package gives every session two tools — `team_send` to deliver messages to
-other sessions, `team_query` to inspect, search, and monitor them — plus a
-`/sid` TUI command that copies the focused session's ID to the clipboard.
+other sessions, `team_query` to inspect, search, and monitor them — plus two
+TUI commands: `/session-id` to copy the focused session's ID, and
+`/list-agents` to show its agent family (parent, siblings, children) with
+status.
 
 Sessions (parents, children, siblings) can coordinate directly instead of
 routing everything through the human's composer.
@@ -80,8 +82,9 @@ Inspect, search, and monitor sibling/child sessions. Actions:
   or a session ID; `search` filters by title.
 - **read** — tail a session's messages (compact summaries, oldest-first);
   `cursor` pages further back using the response's `next`.
-- **status** — is a session running; omit `sessionID` for every running
-  session in the scoped project.
+- **status** — whether a session is running or blocked (`"permission"` /
+  `"form"` ask pending — busy but cannot progress); omit `sessionID` for
+  every running session in the scoped project.
 - **wait** — block until the given session goes idle, bounded by `timeout`
   seconds (default 300).
 
@@ -107,15 +110,35 @@ There is no polling loop: an agent that wants replies reads its own history
 with `team_query` `read`, optionally after `team_query` `wait`. Pending
 messages are inspectable and cancellable with `team_query` `inbox`.
 
-## `/sid` TUI command
+## TUI commands
 
-`/session-id` (alias `/sid`), also "Show and copy session ID" in the command
-palette (group "Team"): copies the focused session's ID to the clipboard and
-shows it in a toast. The CLI's `opencode session delete/export` and the team tools all
-want `ses_…` IDs. The TUI also ships a built-in palette command for this
-("Copy session ID" under "Session"), but it is palette-only — `/sid` is the
-fast path from the composer. Strictly local — no prompts submitted, no server
-round trips beyond what the TUI already does.
+### `/session-id`
+
+Also "Show and copy session ID" in the command palette (group "Team"): copies
+the focused session's ID to the clipboard and shows it in a toast. The CLI's
+`opencode session delete/export` and the team tools all want `ses_…` IDs. The
+TUI also ships a built-in palette command for this ("Copy session ID" under
+"Session"), but it is palette-only — `/session-id` is the fast path from the
+composer.
+
+### `/list-agents`
+
+Also "Show agent tree" in the command palette (group "Team"): opens a select
+dialog listing the focused session's agent family — itself, its parent, its
+siblings, and its children (oldest first within each group). A root session
+has no parent or siblings by definition, so its other top-level project
+sessions are listed instead (most recently updated first). Each row shows
+the session's status, agent, queued inbox count, and full ID:
+
+- **status** — `running`, `idle`, or the blocked-but-running distinction:
+  `blocked:permission` (stuck on a permission ask) or `blocked:form` (stuck
+  on a form), which is the "busy but cannot progress" state.
+- **selection** — pressing Enter copies that session's ID (what
+  `/session-id` does for the focused session, generalized); Esc dismisses.
+
+Both commands are strictly local: no prompts submitted, no model turns —
+state comes from the TUI's client-side session store, which the host keeps
+live-synced.
 
 ## Permissions
 
