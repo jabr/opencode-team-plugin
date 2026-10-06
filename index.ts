@@ -154,7 +154,7 @@ export default Plugin.define({
           "`mode` selects how: 'queue' (default) delivers after the target finishes its current turn (waking idle sessions); " +
           "'steer' injects at the target's next model call without stopping execution; " +
           "'interrupt' aborts the target's current execution entirely, then delivers and starts a fresh run; " +
-          "'park' admits durably without waking the target (delivered on its next run).",
+          "'park' admits durably without waking the target (delivered on its next run; for context-only messages, not action items).",
         input: {
           type: "object",
           properties: {
@@ -168,10 +168,14 @@ export default Plugin.define({
               type: "string",
               enum: ["queue", "steer", "interrupt", "park"],
               description:
-                "Delivery mode. 'queue' (default): after the target's current turn ends, waking idle sessions. " +
-                "'steer': at the target's next model call, without stopping execution. " +
-                "'interrupt': abort the target's run first; the message starts a fresh run (use for 'stop what you're doing'). " +
-                "'park': admit durably but do not wake the target; delivered whenever it next runs.",
+                "Delivery mode. 'queue' (default): after the target's current turn ends, waking idle sessions — " +
+                "use for anything the target should act on next. " +
+                "'steer': at the target's next model call, without stopping execution — " +
+                "use for mid-run course corrections that shouldn't discard in-flight work. " +
+                "'interrupt': abort the target's run first; the message starts a fresh run — " +
+                "use when its current work is wrong or obsolete ('stop what you're doing'). " +
+                "'park': admit durably but do not wake the target; delivered only if it runs again later — " +
+                "use for FYI context, findings, or notes it should see IF it resumes, never for action items.",
             },
           },
           required: ["to", "text"],

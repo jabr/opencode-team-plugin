@@ -46,16 +46,21 @@ delivered to the target model as durable input.
 | `siblings` | all other children of this session's parent |
 | `children` | all children of this session (the parent broadcast) |
 
-**Delivery modes** (`mode`):
+**Delivery modes** (`mode`) — an escalation ladder, from "act on this" to
+"just remember this":
 
 - **`queue`** (default) — queued for after the target finishes its current turn,
-  waking idle sessions.
+  waking idle sessions. Use for anything the target should act on next.
 - **`steer`** — injected at the target's next model call without stopping
-  execution.
+  execution. Use for mid-run course corrections that shouldn't discard
+  in-flight work.
 - **`interrupt`** — aborts the target's current execution entirely, then
-  delivers; the message starts a fresh run. Use for "stop what you're doing".
+  delivers; the message starts a fresh run. Use when its current work is wrong
+  or obsolete ("stop what you're doing").
 - **`park`** — admitted durably but does **not** wake the target; it is
-  delivered whenever the target next runs.
+  delivered only if the target runs again later. Use for FYI context,
+  findings, or notes the target should see IF it resumes — never for action
+  items.
 
 Sending to your own session is refused.
 
