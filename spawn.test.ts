@@ -181,7 +181,7 @@ test("query roots filters before pagination, derives caller project, and preserv
   const client = {
     project: { list: async () => [{ id: "explicit-project", canonical: "/explicit-checkout", name: "Explicit" }] },
     session: {
-      list: async (input: any) => { calls.push(input); return { data: [session] } },
+      list: async () => { throw new Error("Use native ctx.session.list") },
       active: async () => ({}),
     },
     permission: { request: { list: async () => ({ data: [] }) } },
@@ -195,7 +195,11 @@ test("query roots filters before pagination, derives caller project, and preserv
     await plugin.setup({
       location: { project: { id: "wrong-plugin-project" } },
       tool: { transform: async (register: any) => register({ namespace() {}, add(tool: any) { tools.push(tool) } }) },
-      session: { hook: async () => {}, get: async () => ({ id: "ses_caller", projectID: "caller-project" }), list: client.session.list },
+      session: {
+        hook: async () => {},
+        get: async () => ({ id: "ses_caller", projectID: "caller-project" }),
+        list: async (input: any) => { calls.push(input); return { data: [session] } },
+      },
     } as any)
     const query = tools.find((tool) => tool.name === "query")
     const out = await query.execute({ action: "list", parent: "roots", search: "Result", limit: 1 }, { sessionID: "ses_caller" })

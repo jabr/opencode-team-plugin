@@ -45,8 +45,9 @@ function truncate(text: string, max = MAX_TEXT): string {
 
 /**
  * Full API client (loopback to the service this plugin runs inside).
- * The plugin ctx's session domain is a Pick<> without `list`/`active`,
- * so discovery is used instead of relying on undocumented ctx internals.
+ * The plugin ctx still omits `active` and inbox/message APIs. Use its native
+ * session.list (available in the 2.2 SDK), and discover only for missing APIs
+ * instead of relying on undocumented ctx internals.
  */
 let loopback: Promise<OpenCodeClient> | null = null
 
@@ -350,7 +351,7 @@ export default Plugin.define({
             targets = [self.parentID]
           } else if (to === "siblings") {
             if (!self.parentID) throw new Error("team send: this session has no parent, so no siblings")
-            const { data } = await (await api()).session.list({
+            const { data } = await ctx.session.list({
               parentID: self.parentID,
               project: projectID,
               limit: 100,
@@ -358,7 +359,7 @@ export default Plugin.define({
             targets = data.filter((session) => session.id !== context.sessionID).map((session) => session.id)
           } else if (to === "children") {
             // Exclude none: children of this session can never include itself.
-            const { data } = await (await api()).session.list({
+            const { data } = await ctx.session.list({
               parentID: context.sessionID,
               project: projectID,
               limit: 100,
@@ -521,7 +522,7 @@ export default Plugin.define({
               parentID = input.parent
             }
 
-            const { data } = await client.session.list({
+            const { data } = await ctx.session.list({
               parentID,
               search: input.search,
               archived: input.parent === "roots" ? false : undefined,
@@ -607,7 +608,7 @@ export default Plugin.define({
               }),
             }
           }
-          const { data } = await client.session.list({
+          const { data } = await ctx.session.list({
             project: await resolveScope("status", input.project, projectID),
             limit: 100,
           })

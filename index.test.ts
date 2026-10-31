@@ -50,7 +50,7 @@ const sessionList = mock(async (input?: { parentID?: string }) => ({
 const fakeClient = {
   project: { list: async () => REGISTRY },
   session: {
-    list: sessionList,
+    list: async () => { throw new Error("Use native ctx.session.list") },
     active: async () => ({} as Record<string, never>),
     inbox: { list: async () => [], cancel: async () => {} },
   },
@@ -72,6 +72,7 @@ await (
   // The caller's project, not the plugin instance's location, must scope calls.
   location: { project: { id: "unrelated-plugin-project" } },
   session: {
+    list: sessionList,
     get: async ({ sessionID }: { sessionID: string }) => {
       const target = SESSIONS[sessionID]
       if (!target) throw new Error(`no such session: ${sessionID}`)

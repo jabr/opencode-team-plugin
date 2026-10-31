@@ -252,7 +252,7 @@ Run `npm run typecheck` with Bun installed.
 
 ## Requirements
 
-- OpenCode V2 (the plugin and TUI plugin APIs).
+- OpenCode 2.2.0 (tested SDK and host version).
 - The tools are registered `codemode: true` (catalog-only in Code Mode
   sessions), so they cost ~zero context there.
 
