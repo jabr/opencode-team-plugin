@@ -69,7 +69,8 @@ const tools: any[] = []
 await (
   await import("./index.ts")
 ).default.setup({
-  location: { project: { id: CURRENT.id } },
+  // The caller's project, not the plugin instance's location, must scope calls.
+  location: { project: { id: "unrelated-plugin-project" } },
   session: {
     get: async ({ sessionID }: { sessionID: string }) => {
       const target = SESSIONS[sessionID]
@@ -209,6 +210,20 @@ describe("query list / status-all (scope selection)", () => {
     await query.execute({ action: "list" }, self)
     expect(sessionList).toHaveBeenCalledWith(expect.objectContaining({ project: CURRENT.id }))
   })
+
+  test("status-all also defaults to the caller's project", async () => {
+    sessionList.mockClear()
+    await query.execute({ action: "status" }, self)
+    expect(sessionList).toHaveBeenCalledWith(expect.objectContaining({ project: CURRENT.id }))
+  })
+})
+
+test("targeted queries and own inbox use the caller's project despite plugin location", async () => {
+  for (const action of ["read", "inbox", "status", "wait"]) {
+    await query.execute({ action, sessionID: "ses_child" }, self)
+  }
+  const out = await query.execute({ action: "inbox" }, self)
+  expect(JSON.parse(out.content).session).toBe(SELF_ID)
 })
 
 describe("send", () => {
