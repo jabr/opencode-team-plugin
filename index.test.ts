@@ -219,6 +219,7 @@ describe("send", () => {
     expect(synthetic).toHaveBeenCalledWith({
       sessionID: TARGET_ID,
       text: `[agent-message from ${SELF_ID}]\nping`,
+      description: "Message from self",
       delivery: "queue",
       resume: undefined,
       metadata: { from: SELF_ID },

@@ -9,6 +9,7 @@
     "./tui": "./tui.tsx"
   },
   "scripts": {
+    "test": "node --experimental-strip-types --test send.test.ts",
     "typecheck": "bun x tsc"
   },
   "dependencies": {
