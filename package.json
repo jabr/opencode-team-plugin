@@ -2,13 +2,14 @@
   "name": "opencode-team-plugin",
   "version": "0.1.0",
   "type": "module",
-  "description": "Agent-to-agent messaging and session inspection for OpenCode, plus /session-id and /list-agents TUI commands",
+  "description": "Agent-to-agent messaging, session spawning and inspection for OpenCode, plus /session-id and /list-agents TUI commands",
   "main": "index.ts",
   "exports": {
     ".": "./index.ts",
     "./tui": "./tui.tsx"
   },
   "scripts": {
+    "test": "node --experimental-strip-types --test send.test.ts spawn.test.ts",
     "typecheck": "bun x tsc"
   },
   "dependencies": {
