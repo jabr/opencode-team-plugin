@@ -1,8 +1,8 @@
 # Team
 
 Agent-to-agent messaging for [OpenCode](https://opencode.ai) V2. One plugin
-package gives every session two tools — `team_send` to deliver messages to
-other sessions, `team_query` to inspect, search, and monitor them — plus two
+package gives every session three tools — `team_spawn` to create sessions,
+`team_send` to deliver messages, and `team_query` to inspect and monitor them — plus two
 TUI commands: `/session-id` to copy the focused session's ID, and
 `/list-agents` to show its agent family (parent, siblings, children) with
 status.
@@ -31,6 +31,44 @@ path:
 ```
 
 ## Tools
+
+### `team_spawn`
+
+Create a persistent, independent top-level session by default. This makes it
+available in the normal session list; it does **not** switch the UI or open a
+terminal. Use `kind: "child"` to attach a fresh child to the calling session.
+This complements, rather than replaces, built-in `subagent`.
+
+```ts
+await tools.team.spawn({ title: "Review deployment", text: "Review the deployment plan." })
+await tools.team.spawn({ title: "Scratch session" }) // idle, no model turn
+await tools.team.spawn({ title: "Isolated task", kind: "child", worktree: { name: "isolated" } })
+```
+
+- `title` is required and must not be blank.
+- `agent` and `model: { providerID, id, variant? }` are optional; omission
+  preserves normal configured defaults, not the caller's selections.
+- `text` admits an initial task asynchronously through the same synthetic
+  agent-message protocol as `team_send`. No transcript is copied or forked.
+- Without `worktree`, use the caller's actual directory. With `worktree: { name? }`,
+  create through OpenCode's configured strategy, from the caller's checkout
+  (resolved from project worktree inventory, including callers in subdirectories).
+  Starting branches and selecting existing checkouts are not exposed.
+- Root sessions have no parent/sibling addressing or parent lifecycle coupling.
+  Creator provenance is recorded separately in session metadata under `team.spawn`.
+- No automatic completion messages, cancellation propagation, or result collection.
+  Coordinate using `team_send` and `team_query` read/status/wait.
+
+Success returns JSON with `ok`, `sessionID`, actual `directory`, `started`, and
+optional `worktree: { directory }` and `inboxID`. `started: true` means task
+**admission**, not completion. Partial failures return `ok: false`, `stage`,
+`error`, and any known resource IDs/paths. Transport failures may leave admission
+uncertain. When a session exists, recovery attempts a bounded location refresh:
+`directoryStatus: "refreshed"` means the directory was read again;
+`"last-known"` means that read failed and the reported directory is uncertain.
+A pending move may still change the location after a refresh.
+Inspect retained resources before retrying; neither sessions nor
+worktrees are automatically deleted. Worktrees persist independently of sessions.
 
 ### `team_send`
 
@@ -77,8 +115,11 @@ Inspect, search, and monitor sibling/child sessions. Actions:
 - **inbox** — list a session's pending inbox items (defaults to the caller);
   `inboxID` cancels one, `"all"` cancels every pending item.
 - **list** — find sessions: `parent: "my"` (default — this session's
-  children), `parent: "parent"` (siblings), `parent: "all"` (recent sessions),
-  or a session ID; `search` filters by title.
+  children), `parent: "parent"` (siblings), `parent: "roots"` (unarchived
+  top-level sessions across the project's checkouts/worktrees), `parent: "all"`
+  (recent sessions), or a session ID; `search` filters by title. Results include
+  `directory`. Root selection, title search, and archive filtering happen on
+  the server before pagination.
 - **read** — tail a session's messages (compact summaries, oldest-first);
   `cursor` pages further back using the response's `next`.
 - **status** — whether a session is running or blocked (`"permission"` /
@@ -107,6 +148,14 @@ session, **not** the human user. Treat the sender as a coordinating peer:
 honor its requests at natural boundaries and reply with `team_send` addressed
 to the sender's session ID (also carried in the message metadata as `from`,
 so a reply needs no discovery).
+
+The synthetic message's `description` is a compact update label,
+`Message from <sender session title>` (falling back to the session ID).
+Web/desktop clients display this under Updates, not as an expandable
+full-message view. The full framed message remains in `text` for the
+receiving agent and is already returned by the session message API.
+Expandable viewing requires frontend support. Older messages remain unchanged.
+This applies to both `team_send` and initial tasks from `team_spawn`.
 
 There is no polling loop: an agent that wants replies reads its own history
 with `team_query` `read`, optionally after `team_query` `wait`. Pending
@@ -144,18 +193,30 @@ live-synced.
 
 ## Permissions
 
-Each tool has its own permission key — `team_send` and `team_query` — so
+Each tool has its own permission key — `team_spawn`, `team_send`, and `team_query` — so
 config can gate them independently:
 
 ```jsonc
 {
-  "permission": {
-    "team_send": "deny", // e.g. read-only subagents may query but not send
-  }
+  "permissions": [
+    { "action": "team_spawn", "resource": "*", "effect": "deny" },
+    { "action": "team_send", "resource": "*", "effect": "deny" },
+  ], // e.g. read-only subagents may query but not spawn or send
 }
 ```
 
 ## Scoping and security
+
+Spawning uses a deliberately conservative permission ceiling for both roots
+and children. The caller's executing agent rules and session rules are read in
+the caller's location. All `ask` and `deny` rules are frozen as session-level
+**denies**, even restrictions overridden by later caller grants. Allows and
+saved approvals are never copied, so they cannot weaken a destination agent's
+or location's rules. Without an explicit caller `allow` for action/resource
+`*`/`*`, the ceiling denies everything, including otherwise implicit asks.
+This can be more restrictive than the caller (for example, an `.env` ask becomes
+a deny), but never more permissive. The ceiling remains on subsequent agent
+switches. User-authorized session permission edits can replace it.
 
 Messaging is project-trapped **by plugin policy**, not by the server: the HTTP
 API will happily message or read any session by ID. This plugin refuses
@@ -180,9 +241,18 @@ is resolved against the project registry instead, and an unknown name refuses
 by listing the known projects. Without `project`, cross-project delivery stays
 refused.
 
+Project defaults come from the calling session, not the plugin instance's
+checkout. Spawning has no arbitrary parent-ID or cross-project option.
+
+## Development
+
+Run `npm test` with Node 22.18+ (native TypeScript stripping).
+Run `bun test index.test.ts` for the upstream project-selection tests.
+Run `npm run typecheck` with Bun installed.
+
 ## Requirements
 
-- OpenCode V2 (the plugin and TUI plugin APIs).
+- OpenCode 2.2.0 (tested SDK and host version).
 - The tools are registered `codemode: true` (catalog-only in Code Mode
   sessions), so they cost ~zero context there.
 

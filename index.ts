@@ -1,12 +1,13 @@
 // team — agent-to-agent messaging for OpenCode v2.
 //
-// Two tools, both registered `codemode: true` (catalog-only in Code Mode, so
+// Three tools, all registered `codemode: true` (catalog-only in Code Mode, so
 // they cost ~zero context there):
 //
 //   team_send   deliver a message to another session — a ses_… ID, 'parent',
 //               'siblings', or 'children' — queued by default, with steer /
 //               interrupt / park delivery modes.
 //   team_query  inbox | list | read | status | wait over other sessions.
+//   team_spawn  create a persistent root or child, optionally in a new worktree.
 //
 // Scoping policy is enforced HERE, not by the server: the HTTP API will
 // happily message or read any session by ID. This plugin refuses
@@ -28,6 +29,8 @@ import {
   type SessionInfo,
 } from "@opencode/client"
 import { Service } from "@opencode/client/service"
+import { agentMessage } from "./agent-message.ts"
+import { spawnSession, type SpawnInput } from "./spawn.ts"
 
 // Keep tool output compact — message text is truncated per block.
 const MAX_TEXT = 500
@@ -42,8 +45,9 @@ function truncate(text: string, max = MAX_TEXT): string {
 
 /**
  * Full API client (loopback to the service this plugin runs inside).
- * The plugin ctx's session domain is a Pick<> without `list`/`active`,
- * so discovery is used instead of relying on undocumented ctx internals.
+ * The plugin ctx still omits `active` and inbox/message APIs. Use its native
+ * session.list (available in the 2.2 SDK), and discover only for missing APIs
+ * instead of relying on undocumented ctx internals.
  */
 let loopback: Promise<OpenCodeClient> | null = null
 
@@ -194,8 +198,6 @@ async function blockedMap(client: OpenCodeClient): Promise<Map<string, "permissi
 export default Plugin.define({
   id: "team.server",
   async setup(ctx) {
-    const projectID = ctx.location.project.id
-
     /**
      * Project scope check on a fetched target, shared by send and query.
      * `project` absent: this project only — a cross-project target refuses
@@ -208,8 +210,9 @@ export default Plugin.define({
       across: string,
       target: SessionInfo,
       projectInput: string | undefined,
+      callerProjectID: string,
     ): Promise<void> => {
-      if (projectInput === undefined && target.projectID === projectID) return
+      if (projectInput === undefined && target.projectID === callerProjectID) return
       const identity = await targetProjectIdentity(target)
       if (projectInput === undefined || !projectMatches(projectInput, identity)) {
         throw projectRefusal(prefix, target.id, target.title, identity, across, projectInput)
@@ -219,9 +222,9 @@ export default Plugin.define({
     // Project scope for query reads: refuse sessions outside it (the API
     // itself is not project-trapped; this is plugin policy). Returns the
     // fetched session so callers can reuse it.
-    const scopedSession = async (action: string, sessionID: string, projectInput: string | undefined) => {
+    const scopedSession = async (action: string, sessionID: string, projectInput: string | undefined, callerProjectID: string) => {
       const target = await ctx.session.get({ sessionID })
-      await checkProjectScope(`team query ${action}`, "to read across projects", target, projectInput)
+      await checkProjectScope(`team query ${action}`, "to read across projects", target, projectInput, callerProjectID)
       return target
     }
 
@@ -230,8 +233,8 @@ export default Plugin.define({
      * (list; status with no sessionID): resolve the value against the
      * project registry. Unresolvable values refuse with the known labels.
      */
-    const resolveScope = async (action: string, value: string | undefined): Promise<string> => {
-      if (value === undefined) return projectID
+    const resolveScope = async (action: string, value: string | undefined, callerProjectID: string): Promise<string> => {
+      if (value === undefined) return callerProjectID
       const projects = await (await api()).project.list()
       const match = projects.find((project) => projectMatches(value, project))
       if (!match) {
@@ -244,7 +247,44 @@ export default Plugin.define({
     await ctx.tool.transform((editor) => {
       editor.namespace({
         name: "team",
-        description: "Agent-to-agent messaging and session inspection",
+        description: "Agent-to-agent messaging, session spawning and inspection",
+      })
+
+      editor.add({
+        name: "spawn",
+        description:
+          "Create a persistent top-level session (default) or a child of this session, with fresh context. " +
+          "Optional text admits an asynchronous initial task; omit it for an idle session. " +
+          "Optionally create a persistent new worktree through the project's configured strategy. " +
+          "Does not switch the UI. Returns resource IDs/paths even on partial failure; inspect before retrying. " +
+          "Permissions never grant new rights: caller asks/denies become persistent denies; destination rules still apply.",
+        input: {
+          type: "object",
+          properties: {
+            title: { type: "string", minLength: 1 },
+            kind: { type: "string", enum: ["root", "child"], description: "Defaults to root; child attaches to the caller." },
+            agent: { type: "string", description: "Configured agent; omitted uses the normal default." },
+            model: {
+              type: "object",
+              properties: { providerID: { type: "string" }, id: { type: "string" }, variant: { type: "string" } },
+              required: ["providerID", "id"],
+              additionalProperties: false,
+            },
+            text: { type: "string", description: "Initial task, delivered asynchronously as an agent message." },
+            worktree: {
+              type: "object",
+              properties: { name: { type: "string" } },
+              additionalProperties: false,
+              description: "Create a new worktree from the caller's checkout; never automatically removed.",
+            },
+          },
+          required: ["title"],
+          additionalProperties: false,
+        },
+        options: { namespace: "team", permission: "team_spawn", codemode: true },
+        execute: async (raw, context) => ({
+          content: JSON.stringify(await spawnSession(await api(), context.sessionID, context.agent, raw as SpawnInput)),
+        }),
       })
 
       // ------------------------------------------------------------- send
@@ -300,6 +340,7 @@ export default Plugin.define({
           }
 
           const self = await ctx.session.get({ sessionID: context.sessionID })
+          const projectID = self.projectID
           // Role addressing: a child always knows its parent; siblings share
           // that parent. Raw ses_… IDs pass through unchanged. 'children' is
           // the parent broadcast. Resolved targets still pass the project
@@ -310,7 +351,7 @@ export default Plugin.define({
             targets = [self.parentID]
           } else if (to === "siblings") {
             if (!self.parentID) throw new Error("team send: this session has no parent, so no siblings")
-            const { data } = await (await api()).session.list({
+            const { data } = await ctx.session.list({
               parentID: self.parentID,
               project: projectID,
               limit: 100,
@@ -318,7 +359,7 @@ export default Plugin.define({
             targets = data.filter((session) => session.id !== context.sessionID).map((session) => session.id)
           } else if (to === "children") {
             // Exclude none: children of this session can never include itself.
-            const { data } = await (await api()).session.list({
+            const { data } = await ctx.session.list({
               parentID: context.sessionID,
               project: projectID,
               limit: 100,
@@ -336,7 +377,7 @@ export default Plugin.define({
             // assertion about the target — role targets resolve inside
             // this project, so only a since-moved parent or a wrong value
             // can trip this.
-            await checkProjectScope("team send", "to message across projects", target, project)
+            await checkProjectScope("team send", "to message across projects", target, project, projectID)
 
             if (mode === "interrupt") {
               // Aborts the running execution (resume: false = do not restart it).
@@ -346,14 +387,10 @@ export default Plugin.define({
 
             await ctx.session.synthetic({
               sessionID: targetID,
-              // The wire format delivers this as a plain user turn, so
-              // provenance must ride IN the text (see the context hook below).
-              text: `[agent-message from ${context.sessionID}]\n${text}`,
+              ...agentMessage(self, text),
               delivery: mode === "steer" ? "steer" : "queue",
               // Park admits durably without scheduling a run.
               resume: mode === "park" ? false : undefined,
-              // Sender attribution: the receiver can reply without discovery.
-              metadata: { from: context.sessionID },
             })
             delivered.push(target.title || targetID)
           }
@@ -389,7 +426,7 @@ export default Plugin.define({
             parent: {
               type: "string",
               description:
-                "list: 'my' (default — this session's children), 'parent' (siblings), 'all' (recent sessions), or a session ID.",
+                "list: 'my' (default — this session's children), 'parent' (siblings), 'roots' (unarchived top-level sessions across project checkouts), 'all' (recent sessions), or a session ID.",
             },
             search: { type: "string", description: "list: title search filter." },
             project: {
@@ -433,11 +470,13 @@ export default Plugin.define({
             timeout?: number
           }
           const client = await api()
+          const self = await ctx.session.get({ sessionID: context.sessionID })
+          const projectID = self.projectID
 
           if (input.action === "inbox") {
             // Self-cleanup is the common case, so default to the caller.
             const targetID = input.sessionID ?? context.sessionID
-            await scopedSession("inbox", targetID, input.project)
+            await scopedSession("inbox", targetID, input.project, projectID)
             const items = await client.session.inbox.list({ sessionID: targetID })
             const cancelled: string[] = []
             if (input.inboxID === "all") {
@@ -469,11 +508,12 @@ export default Plugin.define({
             // Scope relative to the calling session: "my" children, "parent"
             // siblings, "all" recent sessions of the (chosen) project, or an
             // explicit session ID as parent.
-            let parentID: string | undefined = context.sessionID
+            let parentID: string | null | undefined = context.sessionID
             if (input.parent === "all") {
               parentID = undefined
+            } else if (input.parent === "roots") {
+              parentID = null
             } else if (input.parent === "parent") {
-              const self = await ctx.session.get({ sessionID: context.sessionID })
               // A root session has no siblings; fail instead of silently
               // widening the scope to every session in the project.
               if (!self.parentID) throw new Error("team query list: this session has no parent")
@@ -482,11 +522,12 @@ export default Plugin.define({
               parentID = input.parent
             }
 
-            const { data } = await client.session.list({
+            const { data } = await ctx.session.list({
               parentID,
               search: input.search,
+              archived: input.parent === "roots" ? false : undefined,
               // Default scope: this project. The `project` input opts out.
-              project: await resolveScope("list", input.project),
+              project: await resolveScope("list", input.project, projectID),
               limit: input.limit ?? DEFAULT_LIMIT,
               order: "desc",
             })
@@ -495,6 +536,7 @@ export default Plugin.define({
             const rows = data.map((session) => ({
               id: session.id,
               title: session.title,
+              directory: session.location.directory,
               parent: session.parentID ?? null,
               agent: session.agent,
               running: session.id in running,
@@ -506,7 +548,7 @@ export default Plugin.define({
 
           if (input.action === "read") {
             if (!input.sessionID) throw new Error("team query read: sessionID is required")
-            await scopedSession("read", input.sessionID, input.project)
+            await scopedSession("read", input.sessionID, input.project, projectID)
             // The API rejects `cursor` combined with `order`: the cursor
             // already encodes order and direction. Take the pinned tail
             // (desc) for a fresh read and follow the cursor when paging.
@@ -536,7 +578,7 @@ export default Plugin.define({
             if (input.sessionID === context.sessionID) {
               throw new Error("team query wait: cannot wait on your own session")
             }
-            await scopedSession("wait", input.sessionID, input.project)
+            await scopedSession("wait", input.sessionID, input.project, projectID)
             // The wait API has no timeout of its own; race one so a stuck
             // target cannot hold the caller's turn hostage.
             const timeoutMs = (input.timeout ?? DEFAULT_WAIT_S) * 1000
@@ -554,7 +596,7 @@ export default Plugin.define({
 
           // status
           if (input.sessionID) {
-            const target = await scopedSession("status", input.sessionID, input.project)
+            const target = await scopedSession("status", input.sessionID, input.project, projectID)
             const [running, blocked] = await Promise.all([client.session.active(), blockedMap(client)])
             return {
               content: JSON.stringify({
@@ -566,8 +608,8 @@ export default Plugin.define({
               }),
             }
           }
-          const { data } = await client.session.list({
-            project: await resolveScope("status", input.project),
+          const { data } = await ctx.session.list({
+            project: await resolveScope("status", input.project, projectID),
             limit: 100,
           })
           const [running, blocked] = await Promise.all([client.session.active(), blockedMap(client)])
