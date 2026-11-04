@@ -11,18 +11,21 @@
 // Scoping policy is enforced HERE, not by the server: the HTTP API will
 // happily message or read any session by ID. This plugin refuses
 // cross-project sends and defaults all reads to the current project;
-// `project` opts into others.
+// `project` opts into others — verified against the target, so refusals
+// can name the real project and the retry value.
 //
 // Delivery rides the session inbox as durable synthetic user input; the
 // event stream is deliberately unused (volatile: missed on disconnect).
 // There is no polling loop — agents that want replies read their own history
 // via `team_query read`, optionally after `team_query wait`.
+import { basename } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import {
   OpenCode,
   type OpenCodeClient,
   type SessionInboxInfo,
   type SessionMessageInfo,
+  type SessionInfo,
 } from "@opencode/client"
 import { Service } from "@opencode/client/service"
 
@@ -101,6 +104,73 @@ function inboxFacts(item: SessionInboxInfo): { text?: string; from?: string } {
   }
 }
 
+/** The project identity `project` values are matched and reported against. */
+type ProjectIdentity = { id: string; canonical: string; name?: string }
+
+/** A project's human label: registered name, else its directory basename. */
+function projectLabel(project: { name?: string; canonical: string }): string {
+  return project.name ?? basename(project.canonical)
+}
+
+/**
+ * `project` matches a project by id, registered name, directory basename,
+ * or full path — case-insensitive, exact. Raw project IDs (the only value
+ * the old scoping accepted) keep working.
+ */
+function projectMatches(value: string, project: ProjectIdentity): boolean {
+  const v = value.toLowerCase()
+  return (
+    v === project.id.toLowerCase() ||
+    v === project.canonical.toLowerCase() ||
+    v === basename(project.canonical).toLowerCase() ||
+    (project.name !== undefined && v === project.name.toLowerCase())
+  )
+}
+
+/**
+ * Refusals are the discovery mechanism: name the target's real project and
+ * end with the exact retry value, so a mis-scoped call costs one round
+ * trip. `given` undefined = no `project` was passed (cross-project
+ * refused); otherwise the passed value didn't match.
+ */
+function projectRefusal(
+  prefix: string,
+  targetID: string,
+  title: string | undefined,
+  identity: ProjectIdentity,
+  across: string,
+  given?: string,
+): Error {
+  const label = projectLabel(identity)
+  const where = `${label} (${identity.canonical})`
+  // The missing case quotes the title too: the caller may not know which
+  // agent an opaque ID names.
+  if (given === undefined) {
+    const who = `"${targetID}"${title ? ` ("${title}")` : ""}`
+    return new Error(
+      `${prefix}: ${who} is the agent in ${where} — did you mean the agent in ${label}? pass project: "${label}" ${across}`,
+    )
+  }
+  return new Error(
+    `${prefix}: project "${given}" doesn't match — "${targetID}" is the agent in ${where}. did you mean the agent in ${label}? pass project: "${label}"`,
+  )
+}
+
+/**
+ * A target's project identity: the registry carries names and canonical
+ * paths; the session itself always has the id and directory, so a registry
+ * miss degrades to those rather than failing the check.
+ */
+async function targetProjectIdentity(target: SessionInfo): Promise<ProjectIdentity> {
+  const fallback: ProjectIdentity = { id: target.projectID, canonical: target.location.directory }
+  try {
+    const projects = await (await api()).project.list()
+    return projects.find((p) => p.id === target.projectID) ?? fallback
+  } catch {
+    return fallback
+  }
+}
+
 /**
  * Blocked-but-running detection for status/list rows: a session stuck on a
  * permission ask or a form is busy yet cannot progress until it is answered.
@@ -126,17 +196,49 @@ export default Plugin.define({
   async setup(ctx) {
     const projectID = ctx.location.project.id
 
+    /**
+     * Project scope check on a fetched target, shared by send and query.
+     * `project` absent: this project only — a cross-project target refuses
+     * with a did-you-mean naming its real project. `project` present: it
+     * must match the target's project even when same-project; matching IS
+     * the cross-project opt-in, a mismatch never passes silently.
+     */
+    const checkProjectScope = async (
+      prefix: string,
+      across: string,
+      target: SessionInfo,
+      projectInput: string | undefined,
+    ): Promise<void> => {
+      if (projectInput === undefined && target.projectID === projectID) return
+      const identity = await targetProjectIdentity(target)
+      if (projectInput === undefined || !projectMatches(projectInput, identity)) {
+        throw projectRefusal(prefix, target.id, target.title, identity, across, projectInput)
+      }
+    }
+
     // Project scope for query reads: refuse sessions outside it (the API
     // itself is not project-trapped; this is plugin policy). Returns the
     // fetched session so callers can reuse it.
-    const scopedSession = async (action: string, sessionID: string, scope: string) => {
+    const scopedSession = async (action: string, sessionID: string, projectInput: string | undefined) => {
       const target = await ctx.session.get({ sessionID })
-      if (target.projectID !== scope) {
-        throw new Error(
-          `team query ${action}: refused — "${sessionID}" is not in project "${scope}" (pass \`project\` to opt in)`,
-        )
-      }
+      await checkProjectScope(`team query ${action}`, "to read across projects", target, projectInput)
       return target
+    }
+
+    /**
+     * Scope selection where there is no target session to verify against
+     * (list; status with no sessionID): resolve the value against the
+     * project registry. Unresolvable values refuse with the known labels.
+     */
+    const resolveScope = async (action: string, value: string | undefined): Promise<string> => {
+      if (value === undefined) return projectID
+      const projects = await (await api()).project.list()
+      const match = projects.find((project) => projectMatches(value, project))
+      if (!match) {
+        const known = projects.map((p) => `"${projectLabel(p)}" (${p.canonical})`).join(", ")
+        throw new Error(`team query ${action}: unknown project "${value}" — known projects: ${known}`)
+      }
+      return match.id
     }
 
     await ctx.tool.transform((editor) => {
@@ -149,7 +251,7 @@ export default Plugin.define({
       editor.add({
         name: "send",
         description:
-          "Send a message to another agent session in this project. " +
+          "Send a message to another agent session. " +
           "The message is delivered to the target model as durable input. " +
           "`mode` selects how: 'queue' (default) delivers after the target finishes its current turn (waking idle sessions); " +
           "'steer' injects at the target's next model call without stopping execution; " +
@@ -177,16 +279,21 @@ export default Plugin.define({
                 "'park': admit durably but do not wake the target; delivered only if it runs again later — " +
                 "use for FYI context, findings, or notes it should see IF it resumes, never for action items.",
             },
+            project: {
+              type: "string",
+              description: "The target's project, if it is in another project.",
+            },
           },
           required: ["to", "text"],
           additionalProperties: false,
         },
         options: { namespace: "team", permission: "team_send", codemode: true },
         execute: async (raw, context) => {
-          const { to, text, mode } = raw as {
+          const { to, text, mode, project } = raw as {
             to: string
             text: string
             mode?: "queue" | "steer" | "interrupt" | "park"
+            project?: string
           }
           if (to === context.sessionID) {
             throw new Error("team send: refuses your own session; just reply in turn")
@@ -224,10 +331,12 @@ export default Plugin.define({
           const delivered: string[] = []
           for (const targetID of targets) {
             const target = await ctx.session.get({ sessionID: targetID })
-            if (target.projectID !== projectID) {
-              // Messaging is project-trapped by policy. The API itself is not.
-              throw new Error(`team send: refused — "${targetID}" belongs to a different project`)
-            }
+            // Messaging is project-trapped by policy; the API itself is
+            // not. `project` is both the cross-project opt-in and an
+            // assertion about the target — role targets resolve inside
+            // this project, so only a since-moved parent or a wrong value
+            // can trip this.
+            await checkProjectScope("team send", "to message across projects", target, project)
 
             if (mode === "interrupt") {
               // Aborts the running execution (resume: false = do not restart it).
@@ -263,7 +372,7 @@ export default Plugin.define({
       editor.add({
         name: "query",
         description:
-          "Inspect, search, and monitor sibling/child sessions. Actions: " +
+          "Inspect, search, and monitor sibling/child and other sessions. Actions: " +
           "inbox (list a session's pending inbox items; `inboxID` cancels one, 'all' cancels every pending item), " +
           "list (find sessions; children by default, `parent` for siblings, `search` filters by title), " +
           "read (tail a session's messages, `cursor` pages further back and the response returns `next`), " +
@@ -285,8 +394,7 @@ export default Plugin.define({
             search: { type: "string", description: "list: title search filter." },
             project: {
               type: "string",
-              description:
-                "inbox/list/read/status/wait: project ID to read another project's sessions (opt-in; defaults to this project).",
+              description: "Sessions in another project (by id, name, or path); defaults to this project.",
             },
             limit: {
               type: "integer",
@@ -329,7 +437,7 @@ export default Plugin.define({
           if (input.action === "inbox") {
             // Self-cleanup is the common case, so default to the caller.
             const targetID = input.sessionID ?? context.sessionID
-            await scopedSession("inbox", targetID, input.project ?? projectID)
+            await scopedSession("inbox", targetID, input.project)
             const items = await client.session.inbox.list({ sessionID: targetID })
             const cancelled: string[] = []
             if (input.inboxID === "all") {
@@ -378,7 +486,7 @@ export default Plugin.define({
               parentID,
               search: input.search,
               // Default scope: this project. The `project` input opts out.
-              project: input.project ?? projectID,
+              project: await resolveScope("list", input.project),
               limit: input.limit ?? DEFAULT_LIMIT,
               order: "desc",
             })
@@ -398,7 +506,7 @@ export default Plugin.define({
 
           if (input.action === "read") {
             if (!input.sessionID) throw new Error("team query read: sessionID is required")
-            await scopedSession("read", input.sessionID, input.project ?? projectID)
+            await scopedSession("read", input.sessionID, input.project)
             // The API rejects `cursor` combined with `order`: the cursor
             // already encodes order and direction. Take the pinned tail
             // (desc) for a fresh read and follow the cursor when paging.
@@ -428,7 +536,7 @@ export default Plugin.define({
             if (input.sessionID === context.sessionID) {
               throw new Error("team query wait: cannot wait on your own session")
             }
-            await scopedSession("wait", input.sessionID, input.project ?? projectID)
+            await scopedSession("wait", input.sessionID, input.project)
             // The wait API has no timeout of its own; race one so a stuck
             // target cannot hold the caller's turn hostage.
             const timeoutMs = (input.timeout ?? DEFAULT_WAIT_S) * 1000
@@ -446,7 +554,7 @@ export default Plugin.define({
 
           // status
           if (input.sessionID) {
-            const target = await scopedSession("status", input.sessionID, input.project ?? projectID)
+            const target = await scopedSession("status", input.sessionID, input.project)
             const [running, blocked] = await Promise.all([client.session.active(), blockedMap(client)])
             return {
               content: JSON.stringify({
@@ -459,7 +567,7 @@ export default Plugin.define({
             }
           }
           const { data } = await client.session.list({
-            project: input.project ?? projectID,
+            project: await resolveScope("status", input.project),
             limit: 100,
           })
           const [running, blocked] = await Promise.all([client.session.active(), blockedMap(client)])

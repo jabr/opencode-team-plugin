@@ -62,6 +62,12 @@ delivered to the target model as durable input.
   findings, or notes the target should see IF it resumes — never for action
   items.
 
+**Cross-project** (`project`) — passing the target's project (its id, name,
+or directory) opts a `ses_…` target in another project in, and is verified
+against the target; a mismatch refuses with a did-you-mean naming the real
+project. Role addressing (`parent`/`siblings`/`children`) is inherently
+same-project.
+
 Sending to your own session is refused.
 
 ### `team_query`
@@ -80,6 +86,9 @@ Inspect, search, and monitor sibling/child sessions. Actions:
   every running session in the scoped project.
 - **wait** — block until the given session goes idle, bounded by `timeout`
   seconds (default 300).
+
+Every action accepts `project` to reach another project's sessions — see
+[Scoping and security](#scoping-and-security).
 
 ## The `[agent-message from ses_…]` protocol
 
@@ -150,9 +159,26 @@ config can gate them independently:
 
 Messaging is project-trapped **by plugin policy**, not by the server: the HTTP
 API will happily message or read any session by ID. This plugin refuses
-cross-project sends and defaults all reads to the current project; an explicit
-`project` input opts into another project for reads (and is checked the same
-way on `list`/`read`/`status`/`wait`/`inbox`).
+cross-project sends and defaults all reads to the current project.
+
+`project` (on both tools) opts into another project. It accepts a project id,
+registered name, directory basename, or full path — case-insensitive — so
+`project: "acme-api"` just works, and the raw 40-hex project ID keeps
+working. Passing it is both the opt-in and an assertion: it is verified
+against the target session's actual project (even when same-project), so a
+wrong value refuses rather than being ignored. Refusals are the discovery
+mechanism — they name the target's real project and end with the exact retry
+value:
+
+```text
+team query read: "ses_…" ("…session title…") is the agent in acme-api (/Users/…/acme-api) — did you mean the agent in acme-api? pass project: "acme-api" to read across projects
+```
+
+`team_send` refuses the same way ("to message across projects"). For the
+scope-selecting actions — `list`, and `status` with no `sessionID` — the value
+is resolved against the project registry instead, and an unknown name refuses
+by listing the known projects. Without `project`, cross-project delivery stays
+refused.
 
 ## Requirements
 
