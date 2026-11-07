@@ -75,12 +75,17 @@ Sending to your own session is refused.
 Inspect, search, and monitor sibling/child sessions. Actions:
 
 - **inbox** — list a session's pending inbox items (defaults to the caller);
-  `inboxID` cancels one, `"all"` cancels every pending item.
-- **list** — find sessions: `parent: "my"` (default — this session's
-  children), `parent: "parent"` (siblings), `parent: "all"` (recent sessions),
-  or a session ID; `search` filters by title.
-- **read** — tail a session's messages (compact summaries, oldest-first);
-  `cursor` pages further back using the response's `next`.
+  `inboxID` cancels one, `"all"` cancels every pending item. Pending mail
+  renders in full.
+- **list** — two enumeration modes. **Sessions**: `parent: "my"` (default —
+  this session's children), `parent: "parent"` (siblings), `parent: "all"`
+  (recent sessions), or a session ID; `search` filters by title.
+  **Messages**: with `sessionID`, that session's messages — compact triage
+  previews (~200-char heads) with message IDs, oldest-first; `cursor` pages
+  further back using the response's `next`.
+- **read** — one message in full: `sessionID` + `messageID` (IDs come from a
+  `list` response). Unlike the truncated list previews, this returns the
+  complete message, whitespace preserved.
 - **status** — whether a session is running or blocked (`"permission"` /
   `"form"` ask pending — busy but cannot progress); omit `sessionID` for
   every running session in the scoped project.
@@ -108,9 +113,10 @@ honor its requests at natural boundaries and reply with `team_send` addressed
 to the sender's session ID (also carried in the message metadata as `from`,
 so a reply needs no discovery).
 
-There is no polling loop: an agent that wants replies reads its own history
-with `team_query` `read`, optionally after `team_query` `wait`. Pending
-messages are inspectable and cancellable with `team_query` `inbox`.
+An agent that wants replies reads its own history with `team_query` `list`
+(full text of any message via `team_query` `read`), optionally after
+`team_query` `wait`. Pending messages are inspectable and cancellable with
+`team_query` `inbox`.
 
 ## TUI commands
 

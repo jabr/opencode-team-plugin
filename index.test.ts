@@ -1,8 +1,10 @@
-// Hermetic tests for the `project` opt-in: value matching, refusal
-// messages, scope resolution, and cross-project send. The plugin's module
-// imports are mocked, so these run the real index.ts wiring (ctx + loopback
-// API) against synthetic cross-project fixtures.
-import { describe, expect, mock, test } from "bun:test"
+// Hermetic tests for the `project` opt-in and the list/read split: value
+// matching, refusal messages, scope resolution, cross-project send, triage
+// previews, and singular full-message reads. The plugin's module imports are
+// mocked, so these run the real index.ts wiring (ctx + loopback API) against
+// synthetic cross-project fixtures. Full reads fetch the raw loopback
+// endpoint, so a tiny Bun.serve stands in for the opencode server.
+import { afterAll, describe, expect, mock, test } from "bun:test"
 
 const CURRENT = {
   id: "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111",
@@ -42,6 +44,54 @@ const SESSIONS: Record<string, ReturnType<typeof session>> = {
   ses_child: session("ses_child", CURRENT, "a child"),
 }
 
+// --- fixtures for list (triage previews) -----------------------------------
+
+const REVIEW_TEXT =
+  "Review of the team plugin. The scoping policy is enforced in the plugin rather than the server, " +
+  "which means the raw HTTP API remains unscoped and refusals are the only guardrail for callers " +
+  "bypassing the tools. Delivery rides the session inbox as durable synthetic input."
+const MESSAGES_ASC = [
+  { id: "msg_1", type: "user", text: "Review the team plugin and report issues." },
+  {
+    id: "msg_2",
+    type: "assistant",
+    agent: "reviewer",
+    content: [
+      { type: "tool", name: "read" },
+      { type: "tool", name: "read" },
+      { type: "tool", name: "grep" },
+      { type: "text", text: REVIEW_TEXT },
+    ],
+  },
+]
+// The API returns newest-first; the plugin reverses to oldest-first.
+const messageList = mock(async () => ({ data: [...MESSAGES_ASC].reverse(), cursor: undefined }))
+
+// --- fixture server for read (singular, full text) --------------------------
+// The raw loopback route is GET /api/session/{sid}/message/{mid}.
+
+const FULL_TEXT = "## Review\n\n1. Scoping lives in the plugin.\n2. Refusals name the retry value.\n"
+const messageServer = Bun.serve({
+  port: 0,
+  fetch: (request) => {
+    const url = new URL(request.url)
+    if (url.pathname === "/api/session/ses_sibling/message/msg_full") {
+      return Response.json({
+        id: "msg_full",
+        type: "assistant",
+        agent: "reviewer",
+        content: [{ type: "text", text: FULL_TEXT }],
+      })
+    }
+    return new Response("not found", { status: 404 })
+  },
+})
+afterAll(() => messageServer.stop(true))
+
+// --- inbox fixtures ----------------------------------------------------------
+
+let inboxItems: unknown[] = []
+
 const synthetic = mock(async () => {})
 const sessionList = mock(async (input?: { parentID?: string }) => ({
   data: input?.parentID === SELF_ID ? [SESSIONS.ses_child] : [],
@@ -52,16 +102,16 @@ const fakeClient = {
   session: {
     list: sessionList,
     active: async () => ({} as Record<string, never>),
-    inbox: { list: async () => [], cancel: async () => {} },
+    inbox: { list: async () => inboxItems, cancel: async () => {} },
   },
-  message: { list: async () => ({ data: [], cursor: undefined }) },
+  message: { list: messageList },
   permission: { request: { list: async () => ({ data: [] }) } },
   form: { list: async () => ({ data: [] }) },
 }
 
 mock.module("@opencode/client", () => ({ OpenCode: { make: async () => fakeClient } }))
 mock.module("@opencode/client/service", () => ({
-  Service: { discover: async () => ({ url: "http://127.0.0.1:1" }), headers: () => ({}) },
+  Service: { discover: async () => ({ url: messageServer.url }), headers: () => ({}) },
 }))
 mock.module("@opencode/plugin", () => ({ Plugin: { define: (p: unknown) => p } }))
 
@@ -106,11 +156,11 @@ async function expectRefusal(promise: Promise<unknown>, expected: string) {
 }
 
 const OTHER_WHERE = `acme-api (${OTHER.canonical})`
-const READ_MISSING =
-  `team query read: "${TARGET_ID}" ("Rewriting the metrics pipeline") is the agent in ${OTHER_WHERE} — ` +
+const LIST_MISSING =
+  `team query list: "${TARGET_ID}" ("Rewriting the metrics pipeline") is the agent in ${OTHER_WHERE} — ` +
   `did you mean the agent in acme-api? pass project: "acme-api" to read across projects`
-const READ_WRONG =
-  `team query read: project "other-repo" doesn't match — "${TARGET_ID}" is the agent in ${OTHER_WHERE}. ` +
+const LIST_WRONG =
+  `team query list: project "other-repo" doesn't match — "${TARGET_ID}" is the agent in ${OTHER_WHERE}. ` +
   `did you mean the agent in acme-api? pass project: "acme-api"`
 const SEND_MISSING =
   `team send: "${TARGET_ID}" ("Rewriting the metrics pipeline") is the agent in ${OTHER_WHERE} — ` +
@@ -119,62 +169,132 @@ const SEND_WRONG =
   `team send: project "other-repo" doesn't match — "${TARGET_ID}" is the agent in ${OTHER_WHERE}. ` +
   `did you mean the agent in acme-api? pass project: "acme-api"`
 
-describe("query read (targeted)", () => {
-  test("cross-project read refuses with a did-you-mean when project is absent", async () => {
-    await expectRefusal(query.execute({ action: "read", sessionID: TARGET_ID }, self), READ_MISSING)
+describe("query list (session messages, triage)", () => {
+  test("rows carry ids, kinds, ~200-char previews, and a tool-call summary, oldest-first", async () => {
+    const out = await query.execute({ action: "list", sessionID: "ses_sibling" }, self)
+    const parsed = JSON.parse(out.content)
+    expect(parsed.session).toBe("ses_sibling")
+    expect(parsed.next).toBeNull()
+    expect(parsed.messages.map((row: any) => row.id)).toEqual(["msg_1", "msg_2"])
+    const [user, assistant] = parsed.messages
+    expect(user.kind).toBe("user")
+    expect(user.preview).toBe("Review the team plugin and report issues.")
+    expect(assistant.kind).toBe("assistant")
+    expect(assistant.agent).toBe("reviewer")
+    // 200-char head + the ellipsis.
+    expect(assistant.preview.length).toBe(201)
+    expect(assistant.preview.endsWith("…")).toBe(true)
+    expect(assistant.tools).toBe("3 tool calls: read×2, grep")
+  })
+
+  test("fresh lists pin the tail (desc) and default the limit", async () => {
+    messageList.mockClear()
+    await query.execute({ action: "list", sessionID: "ses_sibling" }, self)
+    expect(messageList).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionID: "ses_sibling", order: "desc", limit: 20 }),
+    )
+  })
+
+  test("cross-project list refuses with a did-you-mean when project is absent", async () => {
+    await expectRefusal(query.execute({ action: "list", sessionID: TARGET_ID }, self), LIST_MISSING)
   })
 
   test("wrong project value refuses even though project was passed", async () => {
     await expectRefusal(
-      query.execute({ action: "read", sessionID: TARGET_ID, project: "other-repo" }, self),
-      READ_WRONG,
+      query.execute({ action: "list", sessionID: TARGET_ID, project: "other-repo" }, self),
+      LIST_WRONG,
     )
   })
 
   test("matching values succeed: name, basename, path, case, raw id", async () => {
-    for (const project of [
-      "acme-api",
-      "ACME-API",
-      OTHER.canonical,
-      "/srv/work/Acme-Api",
-      OTHER.id,
-    ]) {
-      const out = await query.execute({ action: "read", sessionID: TARGET_ID, project }, self)
+    for (const project of ["acme-api", "ACME-API", OTHER.canonical, "/srv/work/Acme-Api", OTHER.id]) {
+      const out = await query.execute({ action: "list", sessionID: TARGET_ID, project }, self)
       expect(JSON.parse(out.content).session).toBe(TARGET_ID)
     }
   })
 
-  test("same-project read without project still works", async () => {
-    const out = await query.execute({ action: "read", sessionID: "ses_sibling" }, self)
+  test("same-project list without project still works", async () => {
+    const out = await query.execute({ action: "list", sessionID: "ses_sibling" }, self)
     expect(JSON.parse(out.content).session).toBe("ses_sibling")
   })
 
-  test("same-project read with a wrong project value refuses, not silently ignored", async () => {
+  test("same-project list with a wrong project value refuses, not silently ignored", async () => {
     await expectRefusal(
-      query.execute({ action: "read", sessionID: "ses_sibling", project: "acme-api" }, self),
-      `team query read: project "acme-api" doesn't match — "ses_sibling" is the agent in opencode-team-plugin (${CURRENT.canonical}). ` +
+      query.execute({ action: "list", sessionID: "ses_sibling", project: "acme-api" }, self),
+      `team query list: project "acme-api" doesn't match — "ses_sibling" is the agent in opencode-team-plugin (${CURRENT.canonical}). ` +
         `did you mean the agent in opencode-team-plugin? pass project: "opencode-team-plugin"`,
     )
   })
 
   test("named project: label and matching use the registered name", async () => {
     await expectRefusal(
-      query.execute({ action: "read", sessionID: "ses_named" }, self),
-      `team query read: "ses_named" is the agent in named-project (${NAMED.canonical}) — ` +
+      query.execute({ action: "list", sessionID: "ses_named" }, self),
+      `team query list: "ses_named" is the agent in named-project (${NAMED.canonical}) — ` +
         `did you mean the agent in named-project? pass project: "named-project" to read across projects`,
     )
-    await query.execute({ action: "read", sessionID: "ses_named", project: "named-project" }, self)
+    await query.execute({ action: "list", sessionID: "ses_named", project: "named-project" }, self)
     // The directory basename matches even when a name is registered.
-    await query.execute({ action: "read", sessionID: "ses_named", project: "named-project-dir" }, self)
+    await query.execute({ action: "list", sessionID: "ses_named", project: "named-project-dir" }, self)
   })
 
   test("unregistered project falls back to the session's own facts", async () => {
-    await query.execute({ action: "read", sessionID: "ses_unregistered", project: UNREGISTERED.canonical }, self)
+    await query.execute({ action: "list", sessionID: "ses_unregistered", project: UNREGISTERED.canonical }, self)
     await expectRefusal(
-      query.execute({ action: "read", sessionID: "ses_unregistered" }, self),
-      `team query read: "ses_unregistered" is the agent in unregistered (${UNREGISTERED.canonical}) — ` +
+      query.execute({ action: "list", sessionID: "ses_unregistered" }, self),
+      `team query list: "ses_unregistered" is the agent in unregistered (${UNREGISTERED.canonical}) — ` +
         `did you mean the agent in unregistered? pass project: "unregistered" to read across projects`,
     )
+  })
+})
+
+describe("query read (singular, full text)", () => {
+  test("returns the complete message, whitespace preserved", async () => {
+    const out = await query.execute({ action: "read", sessionID: "ses_sibling", messageID: "msg_full" }, self)
+    const parsed = JSON.parse(out.content)
+    expect(parsed.session).toBe("ses_sibling")
+    expect(parsed.message.id).toBe("msg_full")
+    expect(parsed.message.kind).toBe("assistant")
+    expect(parsed.message.agent).toBe("reviewer")
+    expect(parsed.message.text).toBe(FULL_TEXT)
+    expect(parsed.message.truncated).toBeUndefined()
+  })
+
+  test("a missing message names the session and message", async () => {
+    await expectRefusal(
+      query.execute({ action: "read", sessionID: "ses_sibling", messageID: "msg_nope" }, self),
+      "team query read: message not found (msg_nope in ses_sibling)",
+    )
+  })
+
+  test("sessionID and messageID are both required", async () => {
+    await expectRefusal(
+      query.execute({ action: "read", sessionID: "ses_sibling" }, self),
+      "team query read: sessionID and messageID are required",
+    )
+    await expectRefusal(
+      query.execute({ action: "read", messageID: "msg_full" }, self),
+      "team query read: sessionID and messageID are required",
+    )
+  })
+
+  test("cross-project read refuses with a did-you-mean", async () => {
+    await expectRefusal(
+      query.execute({ action: "read", sessionID: TARGET_ID, messageID: "msg_full" }, self),
+      LIST_MISSING.replace("team query list", "team query read"),
+    )
+  })
+})
+
+describe("query inbox", () => {
+  test("payloads render in full, uncapped", async () => {
+    const mail = "pending task: ".repeat(500) // 7000 chars
+    inboxItems = [{ id: "inb_1", type: "synthetic", delivery: "queue", payload: { text: mail } }]
+    const out = await query.execute({ action: "inbox" }, self)
+    const row = JSON.parse(out.content).pending[0]
+    expect(row.text).toBe(mail)
+    expect(row.truncated).toBeUndefined()
+    expect(row.from).toBeUndefined()
+    inboxItems = []
   })
 
   test("inbox and status take the same opt-in path", async () => {
@@ -182,7 +302,10 @@ describe("query read (targeted)", () => {
     expect(JSON.parse(inbox.content).session).toBe(TARGET_ID)
     const status = await query.execute({ action: "status", sessionID: TARGET_ID, project: "acme-api" }, self)
     expect(JSON.parse(status.content).id).toBe(TARGET_ID)
-    await expectRefusal(query.execute({ action: "status", sessionID: TARGET_ID }, self), READ_MISSING.replace("read", "status"))
+    await expectRefusal(
+      query.execute({ action: "status", sessionID: TARGET_ID }, self),
+      LIST_MISSING.replace("team query list", "team query status"),
+    )
   })
 })
 
