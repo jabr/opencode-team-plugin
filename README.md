@@ -118,6 +118,13 @@ An agent that wants replies reads its own history with `team_query` `list`
 `team_query` `wait`. Pending messages are inspectable and cancellable with
 `team_query` `inbox`.
 
+The synthetic message's `description` is a compact update label,
+`Message from <sender session title>` (falling back to the session ID).
+Web/desktop clients display this under Updates, not as an expandable
+full-message view. The full framed message remains in `text` for the
+receiving agent and is already returned by the session message API.
+Expandable viewing requires frontend support. Older messages remain unchanged.
+
 ## TUI commands
 
 ### `/session-id`
@@ -185,6 +192,12 @@ scope-selecting actions — `list`, and `status` with no `sessionID` — the val
 is resolved against the project registry instead, and an unknown name refuses
 by listing the known projects. Without `project`, cross-project delivery stays
 refused.
+
+## Development
+
+Run `npm test` with Node 22.18+ (native TypeScript stripping).
+Run `bun test index.test.ts` for the upstream project-selection tests.
+Run `npm run typecheck` with Bun installed.
 
 ## Requirements
 

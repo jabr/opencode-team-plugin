@@ -29,6 +29,7 @@ import {
   type SessionInfo,
 } from "@opencode/client"
 import { Service } from "@opencode/client/service"
+import { agentMessage } from "./agent-message.ts"
 
 // Message listing is triage, not consumption: ~PREVIEW-char heads plus
 // message IDs, with `read` (sessionID + messageID) fetching any message
@@ -416,14 +417,10 @@ export default Plugin.define({
 
             await ctx.session.synthetic({
               sessionID: targetID,
-              // The wire format delivers this as a plain user turn, so
-              // provenance must ride IN the text (see the context hook below).
-              text: `[agent-message from ${context.sessionID}]\n${text}`,
+              ...agentMessage(self, text),
               delivery: mode === "steer" ? "steer" : "queue",
               // Park admits durably without scheduling a run.
               resume: mode === "park" ? false : undefined,
-              // Sender attribution: the receiver can reply without discovery.
-              metadata: { from: context.sessionID },
             })
             delivered.push(target.title || targetID)
           }
