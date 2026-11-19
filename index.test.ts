@@ -88,9 +88,7 @@ const messageServer = Bun.serve({
 })
 afterAll(() => messageServer.stop(true))
 
-// --- inbox fixtures ----------------------------------------------------------
-
-let inboxItems: unknown[] = []
+// --- fixtures ---------------------------------------------------------------
 
 const synthetic = mock(async () => {})
 const sessionList = mock(async (input?: { parentID?: string }) => ({
@@ -102,7 +100,6 @@ const fakeClient = {
   session: {
     list: sessionList,
     active: async () => ({} as Record<string, never>),
-    inbox: { list: async () => inboxItems, cancel: async () => {} },
   },
   message: { list: messageList },
   permission: { request: { list: async () => ({ data: [] }) } },
@@ -285,21 +282,8 @@ describe("query read (singular, full text)", () => {
   })
 })
 
-describe("query inbox", () => {
-  test("payloads render in full, uncapped", async () => {
-    const mail = "pending task: ".repeat(500) // 7000 chars
-    inboxItems = [{ id: "inb_1", type: "synthetic", delivery: "queue", payload: { text: mail } }]
-    const out = await query.execute({ action: "inbox" }, self)
-    const row = JSON.parse(out.content).pending[0]
-    expect(row.text).toBe(mail)
-    expect(row.truncated).toBeUndefined()
-    expect(row.from).toBeUndefined()
-    inboxItems = []
-  })
-
-  test("inbox and status take the same opt-in path", async () => {
-    const inbox = await query.execute({ action: "inbox", sessionID: TARGET_ID, project: "acme-api" }, self)
-    expect(JSON.parse(inbox.content).session).toBe(TARGET_ID)
+describe("query status (cross-project opt-in)", () => {
+  test("status takes the same opt-in path as list", async () => {
     const status = await query.execute({ action: "status", sessionID: TARGET_ID, project: "acme-api" }, self)
     expect(JSON.parse(status.content).id).toBe(TARGET_ID)
     await expectRefusal(

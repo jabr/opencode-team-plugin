@@ -74,9 +74,6 @@ Sending to your own session is refused.
 
 Inspect, search, and monitor sibling/child sessions. Actions:
 
-- **inbox** — list a session's pending inbox items (defaults to the caller);
-  `inboxID` cancels one, `"all"` cancels every pending item. Pending mail
-  renders in full.
 - **list** — two enumeration modes. **Sessions**: `parent: "my"` (default —
   this session's children), `parent: "parent"` (siblings), `parent: "all"`
   (recent sessions), or a session ID; `search` filters by title.
@@ -115,8 +112,7 @@ so a reply needs no discovery).
 
 An agent that wants replies reads its own history with `team_query` `list`
 (full text of any message via `team_query` `read`), optionally after
-`team_query` `wait`. Pending messages are inspectable and cancellable with
-`team_query` `inbox`.
+`team_query` `wait`.
 
 ## TUI commands
 

@@ -6,7 +6,7 @@
 //   team_send   deliver a message to another session — a ses_… ID, 'parent',
 //               'siblings', or 'children' — queued by default, with steer /
 //               interrupt / park delivery modes.
-//   team_query  inbox | list | read | status | wait over other sessions.
+//   team_query  list | read | status | wait over other sessions.
 //
 // Scoping policy is enforced HERE, not by the server: the HTTP API will
 // happily message or read any session by ID. This plugin refuses
@@ -24,7 +24,6 @@ import { Plugin } from "@opencode/plugin"
 import {
   OpenCode,
   type OpenCodeClient,
-  type SessionInboxInfo,
   type SessionMessageInfo,
   type SessionInfo,
 } from "@opencode/client"
@@ -156,21 +155,6 @@ function fullRow(message: SessionMessageInfo): Record<string, unknown> {
     kind: message.type,
     ...(agent ? { agent } : {}),
     text,
-  }
-}
-
-/**
- * Pending mail renders in full: it is the caller's own mail, delivery would
- * surface all of it anyway, and the API response already carries the text.
- */
-function inboxFacts(item: SessionInboxInfo): { text?: string; from?: string } {
-  // Only user/synthetic payloads carry text and metadata; other kinds are
-  // structured controls with nothing to quote.
-  const payload = item.payload as { text?: string; metadata?: Record<string, unknown> }
-  if (!payload.text) return {}
-  return {
-    text: payload.text,
-    ...(payload.metadata?.from !== undefined ? { from: String(payload.metadata.from) } : {}),
   }
 }
 
@@ -443,7 +427,6 @@ export default Plugin.define({
         name: "query",
         description:
           "Inspect, search, and monitor sibling/child and other sessions. Actions: " +
-          "inbox (list a session's pending inbox items; `inboxID` cancels one, 'all' cancels every pending item), " +
           "list (sessions: children by default, `parent` for siblings, `search` filters by title; with `sessionID`, " +
           "that session's messages — compact triage previews with message IDs, oldest-first, `cursor` pages back via `next`), " +
           "read (one message in full: `sessionID` + `messageID` from a list row; list previews are truncated to ~200 chars), " +
@@ -452,11 +435,11 @@ export default Plugin.define({
         input: {
           type: "object",
           properties: {
-            action: { type: "string", enum: ["inbox", "list", "read", "status", "wait"] },
+            action: { type: "string", enum: ["list", "read", "status", "wait"] },
             sessionID: {
               type: "string",
               description:
-                "inbox/read/list/status/wait: target session ID (defaults to this session for inbox). " +
+                "read/list/status/wait: target session ID. " +
                 "list with sessionID returns that session's messages.",
             },
             messageID: {
@@ -477,11 +460,6 @@ export default Plugin.define({
               type: "integer",
               description: "list: max results (default 20). With sessionID: the last N messages.",
             },
-            inboxID: {
-              type: "string",
-              description:
-                "inbox: cancel this pending inbox item instead of listing ('all' cancels every pending item).",
-            },
             cursor: {
               type: "string",
               description:
@@ -500,49 +478,17 @@ export default Plugin.define({
         options: { namespace: "team", permission: "team_query", codemode: true },
         execute: async (raw, context) => {
           const input = raw as {
-            action: "inbox" | "list" | "read" | "status" | "wait"
+            action: "list" | "read" | "status" | "wait"
             sessionID?: string
             messageID?: string
             parent?: string
             search?: string
             project?: string
             limit?: number
-            inboxID?: string
             cursor?: string
             timeout?: number
           }
           const client = await api()
-
-          if (input.action === "inbox") {
-            // Self-cleanup is the common case, so default to the caller.
-            const targetID = input.sessionID ?? context.sessionID
-            await scopedSession("inbox", targetID, input.project)
-            const items = await client.session.inbox.list({ sessionID: targetID })
-            const cancelled: string[] = []
-            if (input.inboxID === "all") {
-              for (const item of items) {
-                await client.session.inbox.cancel({ sessionID: targetID, inboxID: item.id })
-                cancelled.push(item.id)
-              }
-            } else if (input.inboxID) {
-              await client.session.inbox.cancel({ sessionID: targetID, inboxID: input.inboxID })
-              cancelled.push(input.inboxID)
-            }
-            // Re-list after cancelling so the caller sees the cleaned slate.
-            const pending = cancelled.length > 0 ? await client.session.inbox.list({ sessionID: targetID }) : items
-            return {
-              content: JSON.stringify({
-                session: targetID,
-                cancelled,
-                pending: pending.map((item) => ({
-                  id: item.id,
-                  type: item.type,
-                  delivery: item.delivery,
-                  ...inboxFacts(item),
-                })),
-              }),
-            }
-          }
 
           if (input.action === "list") {
             // With a sessionID, list that session's messages: triage
