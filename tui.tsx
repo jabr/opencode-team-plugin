@@ -218,11 +218,26 @@ const COMMANDS: Array<(context: Context) => KeymapCommand> = [sessionIdCommand, 
 export default Plugin.define({
   id: "team.cli",
   setup(context) {
+    // Open a tab for persistent sessions spawned by the server-side team
+    // plugin. Tabs are client-side UI state, so the spawn API cannot do
+    // this; the TUI half observes the same `session.created` event and
+    // recognizes this plugin's spawn provenance in session metadata.
+    // Only roots get tabs (children belong to their parent's tab), and a
+    // disabled tab strip simply ignores the request.
+    const onSessionCreated = context.data.on("session.created", (event) => {
+      if (event.data.parentID) return
+      const spawned = event.data.metadata?.["team.spawn"] as
+        | { creatorSessionID?: string }
+        | undefined
+      if (!spawned?.creatorSessionID) return
+      context.ui.tabs.open(event.data.sessionID)
+    })
+
     // Keymap layers are owned by a rendering component: registering one
     // directly in setup() throws "Keymap.Provider is missing". The `app` slot
     // mounts once at the app root and contributes nothing visible — it exists
     // only to give the layer a component owner (and dispose it on unload).
-    return context.ui.slot({
+    const slot = context.ui.slot({
       append: "app",
       render: () => {
         context.keymap.layer(() => ({
@@ -232,5 +247,10 @@ export default Plugin.define({
         return null
       },
     })
+
+    return () => {
+      onSessionCreated()
+      slot?.()
+    }
   },
 })
