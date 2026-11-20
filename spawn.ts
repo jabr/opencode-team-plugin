@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve } from "node:path"
-import type { OpenCodeClient, PermissionRule, SessionInfo, WorktreeInfo } from "@opencode/client"
+import type { AgentInfo, ModelInfo, OpenCodeClient, PermissionRule, SessionInfo, WorktreeInfo } from "@opencode/client"
 import { agentMessage } from "./agent-message.ts"
 
 export interface SpawnInput {
@@ -35,11 +35,73 @@ export function checkoutSource(directory: string, inventory: readonly { director
 }
 
 /** Resource creation is intentionally not rolled back on any later failure. */
+
+/**
+ * Refusals are the discovery mechanism for exact spawn references. The lists
+ * are filtered to usable values: hidden/internal agents (title, summary,
+ * compaction) are not offered, and chat models are the only ones a session can
+ * run. API failures fail closed before any worktree/session is created.
+ */
+async function validateSpawnAgent(client: OpenCodeClient, location: SessionInfo["location"], agent: string) {
+  const agents = await client.agent
+    .list({ location })
+    .then((output) => output.data)
+    .catch((error: unknown) => {
+      throw new Error(`team spawn: could not list agents: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  if (!agents.some((candidate) => candidate.id === agent)) {
+    const known = agents.filter((candidate: AgentInfo) => !candidate.hidden).map((candidate) => candidate.id)
+    throw new Error(`team spawn: unknown agent "${agent}" — known agents: ${known.join(", ")}`)
+  }
+}
+
+async function validateSpawnModel(
+  client: OpenCodeClient,
+  location: SessionInfo["location"],
+  model: NonNullable<SpawnInput["model"]>,
+) {
+  const models = await client.model
+    .list({ location, types: ["chat"] })
+    .then((output) => output.data)
+    .catch((error: unknown) => {
+      throw new Error(`team spawn: could not list models: ${error instanceof Error ? error.message : String(error)}`)
+    })
+
+  const match = models.find((candidate: ModelInfo) => candidate.providerID === model.providerID && candidate.id === model.id)
+  if (!match) {
+    const providerModels = models.filter((candidate: ModelInfo) => candidate.providerID === model.providerID)
+    if (providerModels.length > 0) {
+      const known = providerModels.map((candidate) => candidate.id)
+      throw new Error(
+        `team spawn: unknown model "${model.providerID}/${model.id}" — provider "${model.providerID}" models: ${known.join(", ")}`,
+      )
+    }
+    const providers = [...new Set(models.map((candidate: ModelInfo) => candidate.providerID))]
+    throw new Error(`team spawn: unknown model "${model.providerID}/${model.id}" — known providers: ${providers.join(", ")}`)
+  }
+
+  if (model.variant !== undefined) {
+    const variants = match.variants.map((variant) => variant.id)
+    if (!variants.includes(model.variant)) {
+      const known = variants.length > 0 ? variants.join(", ") : "this model has no variants"
+      throw new Error(
+        `team spawn: invalid variant "${model.variant}" for ${model.providerID}/${model.id} — valid variants: ${known}`,
+      )
+    }
+  }
+}
+
+async function validateSpawnInputs(client: OpenCodeClient, location: SessionInfo["location"], input: SpawnInput) {
+  if (input.agent !== undefined) await validateSpawnAgent(client, location, input.agent)
+  if (input.model !== undefined) await validateSpawnModel(client, location, input.model)
+}
+
 export async function spawnSession(client: OpenCodeClient, sessionID: string, agent: string, input: SpawnInput) {
   if (!input.title.trim()) throw new Error("team spawn: title must not be blank")
   const self = await client.session.get({ sessionID })
   const callerAgent = await client.agent.get({ agentID: agent, location: self.location })
   const callerRules = [...callerAgent.data.permissions, ...(self.permissions ?? [])]
+  await validateSpawnInputs(client, self.location, input)
   let directory: string = self.location.directory
   let worktree: WorktreeInfo | undefined
   let session: SessionInfo | undefined

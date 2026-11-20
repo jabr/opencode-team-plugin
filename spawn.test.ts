@@ -18,7 +18,24 @@ function fixture(options: { waitFails?: boolean; sessionReadFailures?: number } 
   let sessionReadFailures = options.sessionReadFailures ?? 0
   const child = { ...self, id: "ses_new" }
   const client = {
-    agent: { get: async () => ({ data: { permissions: [allow, { action: "edit", resource: "*", effect: "deny" }] } }) },
+    agent: {
+      get: async () => ({ data: { permissions: [allow, { action: "edit", resource: "*", effect: "deny" }] } }),
+      list: async () => ({
+        data: [
+          { id: "build", hidden: false },
+          { id: "review", hidden: false },
+          { id: "title", hidden: true },
+        ],
+      }),
+    },
+    model: {
+      list: async () => ({
+        data: [
+          { providerID: "provider", id: "model", variants: [{ id: "variant" }] },
+          { providerID: "other", id: "other-model", variants: [] },
+        ],
+      }),
+    },
     session: {
       get: async ({ sessionID }: { sessionID: string }) => {
         if (sessionID === self.id) return self
@@ -147,6 +164,50 @@ test("blank titles fail before any resource creation", async () => {
   assert.equal(f.state().worktreeInput, undefined)
 })
 
+/** Exact-message validator; Node treats an identical regex literal as ambiguous. */
+const rejectsWith = (promise: Promise<unknown>, message: string) =>
+  assert.rejects(promise, (error: unknown) => error instanceof Error && error.message === message)
+
+test("unknown agents refuse with visible configured IDs before any resource creation", async () => {
+  const f = fixture()
+  await rejectsWith(
+    spawnSession(f.client, f.self.id, "build", { title: "Bad agent", agent: "planner", worktree: {} }),
+    'team spawn: unknown agent "planner" — known agents: build, review',
+  )
+  assert.equal(f.state().created, undefined)
+  assert.equal(f.state().worktreeInput, undefined)
+})
+
+test("unknown models refuse with provider models, providers, or variants before resource creation", async () => {
+  const f = fixture()
+  await rejectsWith(
+    spawnSession(f.client, f.self.id, "build", {
+      title: "Bad model",
+      model: { providerID: "provider", id: "nope" },
+      worktree: {},
+    }),
+    'team spawn: unknown model "provider/nope" — provider "provider" models: model',
+  )
+  await rejectsWith(
+    spawnSession(f.client, f.self.id, "build", {
+      title: "Bad provider",
+      model: { providerID: "missing", id: "model" },
+      worktree: {},
+    }),
+    'team spawn: unknown model "missing/model" — known providers: provider, other',
+  )
+  await rejectsWith(
+    spawnSession(f.client, f.self.id, "build", {
+      title: "Bad variant",
+      model: { providerID: "provider", id: "model", variant: "ultra" },
+      worktree: {},
+    }),
+    'team spawn: invalid variant "ultra" for provider/model — valid variants: variant',
+  )
+  assert.equal(f.state().created, undefined)
+  assert.equal(f.state().worktreeInput, undefined)
+})
+
 test("permission ceiling never copies grants or relaxes restrictions", () => {
   assert.deepEqual(spawnPermissions([allow]), [])
   assert.deepEqual(spawnPermissions([]), [{ action: "*", resource: "*", effect: "deny" }])
@@ -171,6 +232,8 @@ test("spawn registration has an independent permission and roots are discoverabl
   await plugin.setup(ctx as any)
   const spawn = tools.find((tool) => tool.name === "spawn")
   assert.deepEqual(spawn.options, { namespace: "team", permission: "team_spawn", codemode: true })
+  assert.match(spawn.input.properties.agent.description, /agent ID, e\.g\. build, plan/)
+  assert.match(spawn.input.properties.model.description, /tools\.opencode\.models/)
   const query = tools.find((tool) => tool.name === "query")
   assert.match(query.input.properties.parent.description, /roots/)
 })

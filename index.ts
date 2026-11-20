@@ -317,12 +317,25 @@ export default Plugin.define({
           properties: {
             title: { type: "string", minLength: 1 },
             kind: { type: "string", enum: ["root", "child"], description: "Defaults to root; child attaches to the caller." },
-            agent: { type: "string", description: "Configured agent; omitted uses the normal default." },
+            agent: {
+              type: "string",
+              description:
+                "Exact OpenCode agent ID, e.g. build, plan. This is the stable config key. " +
+                "Omit to use the target location's configured default agent. Invalid values refuse with the configured agent IDs.",
+            },
             model: {
               type: "object",
-              properties: { providerID: { type: "string" }, id: { type: "string" }, variant: { type: "string" } },
+              properties: {
+                providerID: { type: "string", description: "Exact provider ID." },
+                id: { type: "string", description: "Exact model ID within that provider." },
+                variant: { type: "string", description: "Exact model variant; omit for the model default." },
+              },
               required: ["providerID", "id"],
               additionalProperties: false,
+              description:
+                "Exact OpenCode model ref. In Code Mode, look up exact IDs with tools.opencode.models. " +
+                "Omit to use the target agent/location model default. " +
+                "Invalid provider, model, or variant values refuse with nearby options.",
             },
             text: { type: "string", description: "Initial task, delivered asynchronously as an agent message." },
             worktree: {
