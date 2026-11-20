@@ -611,7 +611,8 @@ export default Plugin.define({
               const why = response.status === 404 ? "message not found" : `HTTP ${response.status}`
               throw new Error(`team query read: ${why} (${input.messageID} in ${input.sessionID})`)
             }
-            const message = (await response.json()) as SessionMessageInfo
+            // The raw route wraps the decoded message in a `data` envelope.
+            const message = ((await response.json()) as { data: SessionMessageInfo }).data
             return {
               content: JSON.stringify({ session: input.sessionID, message: fullRow(message) }),
             }

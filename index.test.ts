@@ -68,7 +68,8 @@ const MESSAGES_ASC = [
 const messageList = mock(async () => ({ data: [...MESSAGES_ASC].reverse(), cursor: undefined }))
 
 // --- fixture server for read (singular, full text) --------------------------
-// The raw loopback route is GET /api/session/{sid}/message/{mid}.
+// The raw loopback route is GET /api/session/{sid}/message/{mid}; its body
+// wraps the message in a `data` envelope.
 
 const FULL_TEXT = "## Review\n\n1. Scoping lives in the plugin.\n2. Refusals name the retry value.\n"
 const messageServer = Bun.serve({
@@ -77,10 +78,12 @@ const messageServer = Bun.serve({
     const url = new URL(request.url)
     if (url.pathname === "/api/session/ses_sibling/message/msg_full") {
       return Response.json({
-        id: "msg_full",
-        type: "assistant",
-        agent: "reviewer",
-        content: [{ type: "text", text: FULL_TEXT }],
+        data: {
+          id: "msg_full",
+          type: "assistant",
+          agent: "reviewer",
+          content: [{ type: "text", text: FULL_TEXT }],
+        },
       })
     }
     return new Response("not found", { status: 404 })
