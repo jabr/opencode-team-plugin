@@ -113,7 +113,8 @@ Sending to your own session is refused.
 Inspect, search, and monitor sibling/child sessions. Actions:
 
 - **list** — two enumeration modes. **Sessions**: `parent: "my"` (default —
-  this session's children), `parent: "parent"` (siblings), `parent: "roots"`
+  this session's children), `parent: "siblings"` (other children of this
+  session's parent), `parent: "roots"`
   (unarchived top-level sessions across the project's checkouts/worktrees),
   `parent: "all"` (recent sessions), or a session ID; `search` filters by title.
   Results include `directory`. Root selection, title search, and archive
@@ -128,7 +129,9 @@ Inspect, search, and monitor sibling/child sessions. Actions:
   `"form"` ask pending — busy but cannot progress); omit `sessionID` for
   every running session in the scoped project.
 - **wait** — block until the given session goes idle, bounded by `timeout`
-  seconds (default 300).
+  seconds (default 300). A timeout result includes the target's `running` and
+  `blocked` state, so "still working" is distinguishable from "stuck on an
+  ask".
 
 Every action accepts `project` to reach another project's sessions — see
 [Scoping and security](#scoping-and-security).

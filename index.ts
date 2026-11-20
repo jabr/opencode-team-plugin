@@ -476,11 +476,11 @@ export default Plugin.define({
         name: "query",
         description:
           "Inspect, search, and monitor sibling/child and other sessions. Actions: " +
-          "list (sessions: children by default, `parent` for siblings, `search` filters by title; with `sessionID`, " +
+          "list (sessions: children by default, `siblings` for this session's siblings, `search` filters by title; with `sessionID`, " +
           "that session's messages — compact triage previews with message IDs, oldest-first, `cursor` pages back via `next`), " +
           "read (one message in full: `sessionID` + `messageID` from a list row; list previews are truncated to ~200 chars), " +
           "status (whether a session is running or blocked on a permission ask or form; omit sessionID for all running in the scoped project), " +
-          "wait (block until the given session goes idle, bounded by `timeout` seconds).",
+          "wait (block until the given session goes idle, bounded by `timeout` seconds; a timeout result includes the target's running/blocked state).",
         input: {
           type: "object",
           properties: {
@@ -498,7 +498,7 @@ export default Plugin.define({
             parent: {
               type: "string",
               description:
-                "list: 'my' (default — this session's children), 'parent' (siblings), 'roots' (unarchived top-level sessions across project checkouts), 'all' (recent sessions), or a session ID.",
+                "list: 'my' (default — this session's children), 'siblings' (other children of this session's parent), 'roots' (unarchived top-level sessions across project checkouts), 'all' (recent sessions), or a session ID.",
             },
             search: { type: "string", description: "list: title search filter." },
             project: {
@@ -567,7 +567,7 @@ export default Plugin.define({
                 }),
               }
             }
-            // Scope relative to the calling session: "my" children, "parent"
+            // Scope relative to the calling session: "my" children, "siblings"
             // siblings, "all" recent sessions of the (chosen) project, or an
             // explicit session ID as parent.
             let parentID: string | null | undefined = context.sessionID
@@ -575,7 +575,7 @@ export default Plugin.define({
               parentID = undefined
             } else if (input.parent === "roots") {
               parentID = null
-            } else if (input.parent === "parent") {
+            } else if (input.parent === "siblings") {
               // A root session has no siblings; fail instead of silently
               // widening the scope to every session in the project.
               if (!caller.parentID) throw new Error("team query list: this session has no parent")
@@ -650,6 +650,19 @@ export default Plugin.define({
               timeout,
             ])
             if (timer) clearTimeout(timer)
+            if (status === "timeout") {
+              // A timeout is ambiguous between "still working" and "stuck":
+              // attach run/blocked state so the caller can tell them apart.
+              const [running, blocked] = await Promise.all([client.session.active(), blockedMap(client)])
+              return {
+                content: JSON.stringify({
+                  session: input.sessionID,
+                  status,
+                  running: input.sessionID in running,
+                  blocked: blocked.get(input.sessionID) ?? null,
+                }),
+              }
+            }
             return { content: JSON.stringify({ session: input.sessionID, status }) }
           }
 

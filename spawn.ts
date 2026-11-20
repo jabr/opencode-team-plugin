@@ -139,10 +139,15 @@ export async function spawnSession(client: OpenCodeClient, sessionID: string, ag
     if (session.projectID !== self.projectID) throw new Error("Created session is outside the caller's project; no task admitted")
     if (worktree && directory !== worktree.directory) throw new Error("Session did not reach the new worktree; no task admitted")
     stage = "task"
+    // Steer, not queue: the host injects an agent's setup reminders (e.g. the
+    // plan-mode notice) at run start, and a queue admission would be delivered
+    // only after that reminder-only run completes — producing a stray "what
+    // would you like to plan?" first turn. Steer joins the task into the
+    // session's first run; steer to an idle session still wakes and runs.
     const admitted = input.text === undefined ? undefined : await client.session.synthetic({
       sessionID: session.id,
       ...agentMessage(self, input.text),
-      delivery: "queue",
+      delivery: "steer",
       resume: true,
     })
     return { ok: true, sessionID: session.id, directory, worktree, started: admitted !== undefined, inboxID: admitted?.id }

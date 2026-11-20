@@ -101,7 +101,7 @@ test("child in new worktree moves before synthetic admission and keeps chosen ag
   assert.deepEqual(state.created!.model, model)
   assert.deepEqual(state.worktreeInput, { projectID: "caller-project", from: "/checkout", name: "feature" })
   assert.equal(state.moved, true)
-  assert.deepEqual(state.synthetic, { sessionID: "ses_new", text: "[agent-message from ses_caller]\nTask", description: "Message from Creator session", metadata: { from: f.self.id }, delivery: "queue", resume: true })
+  assert.deepEqual(state.synthetic, { sessionID: "ses_new", text: "[agent-message from ses_caller]\nTask", description: "Message from Creator session", metadata: { from: f.self.id }, delivery: "steer", resume: true })
 })
 
 test("spawn task update falls back to creator ID when its title is missing", async () => {
@@ -278,7 +278,7 @@ test("query roots filters before pagination, derives caller project, and preserv
     assert.equal(calls.at(-1).project, "explicit-project")
     assert.equal(calls.at(-1).parentID, null)
     assert.equal(calls.at(-1).archived, false)
-    await assert.rejects(query.execute({ action: "list", parent: "parent" }, { sessionID: "ses_caller" }), /no parent/)
+    await assert.rejects(query.execute({ action: "list", parent: "siblings" }, { sessionID: "ses_caller" }), /no parent/)
   } finally {
     mock.restoreAll()
   }
