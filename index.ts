@@ -6,7 +6,7 @@
 //   team_send   deliver a message to another session — a ses_… ID, 'parent',
 //               'siblings', or 'children' — queued by default, with steer /
 //               interrupt / park delivery modes.
-//   team_query  inbox | list | read | status | wait over other sessions.
+//   team_query  list | read | status | wait over other sessions.
 //   team_spawn  create a persistent root or child, optionally in a new worktree.
 //
 // Scoping policy is enforced HERE, not by the server: the HTTP API will
@@ -18,13 +18,13 @@
 // Delivery rides the session inbox as durable synthetic user input; the
 // event stream is deliberately unused (volatile: missed on disconnect).
 // There is no polling loop — agents that want replies read their own history
-// via `team_query read`, optionally after `team_query wait`.
+// via `team_query list` (full text of any message via `team_query read`),
+// optionally after `team_query wait`.
 import { basename } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import {
   OpenCode,
   type OpenCodeClient,
-  type SessionInboxInfo,
   type SessionMessageInfo,
   type SessionInfo,
 } from "@opencode/client"
@@ -32,33 +32,45 @@ import { Service } from "@opencode/client/service"
 import { agentMessage } from "./agent-message.ts"
 import { spawnSession, type SpawnInput } from "./spawn.ts"
 
-// Keep tool output compact — message text is truncated per block.
-const MAX_TEXT = 500
+// Message listing is triage, not consumption: ~PREVIEW-char heads plus
+// message IDs, with `read` (sessionID + messageID) fetching any message
+// in full. Full-fidelity paths are deliberately uncapped: an explicit
+// full read must return the whole message.
+const PREVIEW = 200
 const DEFAULT_LIMIT = 20
 // `wait` bounds: the wait API has no timeout parameter of its own.
 const DEFAULT_WAIT_S = 300
 
-function truncate(text: string, max = MAX_TEXT): string {
+function truncate(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim()
   return flat.length > max ? `${flat.slice(0, max)}…` : flat
 }
 
 /**
  * Full API client (loopback to the service this plugin runs inside).
- * The plugin ctx still omits `active` and inbox/message APIs. Use its native
+ * The plugin ctx still omits `active` and message APIs. Use its native
  * session.list (available in the 2.2 SDK), and discover only for missing APIs
  * instead of relying on undocumented ctx internals.
+ * The discovered endpoint is kept alongside the client: the promise client
+ * lacks `message.get`, so singular full reads fetch the message raw
+ * (see the query read action).
  */
-let loopback: Promise<OpenCodeClient> | null = null
+type Loopback = {
+  client: OpenCodeClient
+  endpoint: NonNullable<Awaited<ReturnType<typeof Service.discover>>>
+}
 
-function api(): Promise<OpenCodeClient> {
+let loopback: Promise<Loopback> | null = null
+
+function connect(): Promise<Loopback> {
   loopback ??= (async () => {
     const endpoint = await Service.discover()
     if (!endpoint) throw new Error("team: no healthy opencode service found")
-    return OpenCode.make({
+    const client = OpenCode.make({
       baseUrl: endpoint.url,
       headers: Service.headers(endpoint),
     })
+    return { client, endpoint }
   })()
   // If discovery/connection failed once, allow a fresh attempt next call.
   loopback.catch(() => {
@@ -67,44 +79,86 @@ function api(): Promise<OpenCodeClient> {
   return loopback
 }
 
+function api(): Promise<OpenCodeClient> {
+  return connect().then(({ client }) => client)
+}
+
+/** Aggregate tool-call parts into one summary line, e.g.
+ *  "3 tool calls: read×2, grep" — previews spend their budget on text,
+ *  not on [tool:…] spam. */
+function toolSummary(names: string[]): string | undefined {
+  if (names.length === 0) return undefined
+  const counts = new Map<string, number>()
+  for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1)
+  const parts = [...counts].map(([name, n]) => (n > 1 ? `${name}×${n}` : name))
+  return `${names.length} tool call${names.length > 1 ? "s" : ""}: ${parts.join(", ")}`
+}
+
 /**
- * Compact renderer for a session message; `null` skips low-signal noise.
- * Synthetic messages are expected to carry the in-text
+ * Triage row for a session message: the message ID plus a ~PREVIEW-char
+ * head preview, so a caller can decide which message(s) to fetch in full
+ * via `read`. Synthetic messages are expected to carry the in-text
  * "[agent-message from …]" frame added at send time; unframed ones (older
  * history, other producers) render as bare text with no provenance.
+ * Returns `null` to skip low-signal noise (idle).
  */
-function describe(message: SessionMessageInfo): string | null {
+function previewRow(message: SessionMessageInfo): Record<string, unknown> | null {
   switch (message.type) {
-    case "user":
-      return `user: ${truncate(message.text)}`
-    case "synthetic":
-      return truncate(message.text)
-    case "assistant": {
-      const parts = message.content
-        .map((part) => {
-          if (part.type === "text" && part.text) return truncate(part.text)
-          return part.type === "tool" ? `[tool:${part.name}]` : null
-        })
-        .filter((part): part is string => part != null)
-      return `assistant${message.agent ? `(${message.agent})` : ""}: ${parts.join(" ")}`
-    }
-    case "system":
-      return message.text ? `system: ${truncate(message.text)}` : "system"
     case "idle":
       return null
+    case "user":
+    case "synthetic":
+      return { id: message.id, kind: message.type, preview: truncate(message.text, PREVIEW) }
+    case "system":
+      return { id: message.id, kind: "system", preview: message.text ? truncate(message.text, PREVIEW) : "" }
+    case "assistant": {
+      const text = message.content
+        .map((part) => (part.type === "text" && part.text ? part.text : ""))
+        .join(" ")
+      const tools = toolSummary(message.content.flatMap((part) => (part.type === "tool" ? [part.name] : [])))
+      return {
+        id: message.id,
+        kind: "assistant",
+        ...(message.agent ? { agent: message.agent } : {}),
+        preview: truncate(text, PREVIEW),
+        ...(tools ? { tools } : {}),
+      }
+    }
     default:
-      return `${message.type}`
+      return { id: message.id, kind: message.type, preview: "" }
   }
 }
 
-/** The human bits of a pending inbox item, for compact listings. */
-function inboxFacts(item: SessionInboxInfo): { text?: string; from?: string } {
-  // Only user/synthetic payloads carry text and metadata; other kinds are
-  // structured controls with nothing to quote.
-  const payload = item.payload as { text?: string; metadata?: Record<string, unknown> }
+/**
+ * Full-fidelity render for a singular `read`. Unlike previews, whitespace
+ * is preserved (deliverables are often markdown) and there is no cap: the
+ * caller asked for this message in full.
+ */
+function fullRow(message: SessionMessageInfo): Record<string, unknown> {
+  let text = ""
+  let agent: string | undefined
+  switch (message.type) {
+    case "user":
+    case "synthetic":
+      text = message.text
+      break
+    case "system":
+      text = message.text ?? ""
+      break
+    case "assistant":
+      agent = message.agent
+      text = message.content
+        .map((part) => (part.type === "text" && part.text ? part.text : ""))
+        .join("\n\n")
+      break
+    default:
+      text = ""
+  }
   return {
-    text: payload.text ? truncate(payload.text) : undefined,
-    from: payload.metadata?.from !== undefined ? String(payload.metadata.from) : undefined,
+    id: message.id,
+    kind: message.type,
+    ...(agent ? { agent } : {}),
+    text,
   }
 }
 
@@ -410,18 +464,24 @@ export default Plugin.define({
         name: "query",
         description:
           "Inspect, search, and monitor sibling/child and other sessions. Actions: " +
-          "inbox (list a session's pending inbox items; `inboxID` cancels one, 'all' cancels every pending item), " +
-          "list (find sessions; children by default, `parent` for siblings, `search` filters by title), " +
-          "read (tail a session's messages, `cursor` pages further back and the response returns `next`), " +
+          "list (sessions: children by default, `parent` for siblings, `search` filters by title; with `sessionID`, " +
+          "that session's messages — compact triage previews with message IDs, oldest-first, `cursor` pages back via `next`), " +
+          "read (one message in full: `sessionID` + `messageID` from a list row; list previews are truncated to ~200 chars), " +
           "status (whether a session is running or blocked on a permission ask or form; omit sessionID for all running in the scoped project), " +
           "wait (block until the given session goes idle, bounded by `timeout` seconds).",
         input: {
           type: "object",
           properties: {
-            action: { type: "string", enum: ["inbox", "list", "read", "status", "wait"] },
+            action: { type: "string", enum: ["list", "read", "status", "wait"] },
             sessionID: {
               type: "string",
-              description: "inbox/read/status/wait: target session ID (defaults to this session for inbox).",
+              description:
+                "read/list/status/wait: target session ID. " +
+                "list with sessionID returns that session's messages.",
+            },
+            messageID: {
+              type: "string",
+              description: "read: the message ID to fetch in full (from a list response row).",
             },
             parent: {
               type: "string",
@@ -435,16 +495,12 @@ export default Plugin.define({
             },
             limit: {
               type: "integer",
-              description: "list/read: max results (default 20). read returns the last N messages.",
-            },
-            inboxID: {
-              type: "string",
-              description:
-                "inbox: cancel this pending inbox item instead of listing ('all' cancels every pending item).",
+              description: "list: max results (default 20). With sessionID: the last N messages.",
             },
             cursor: {
               type: "string",
-              description: "read: paging cursor from a previous response's `next` (older history).",
+              description:
+                "list: paging cursor from a previous response's `next` (older history), when listing a session's messages.",
             },
             timeout: {
               type: "integer",
@@ -459,13 +515,13 @@ export default Plugin.define({
         options: { namespace: "team", permission: "team_query", codemode: true },
         execute: async (raw, context) => {
           const input = raw as {
-            action: "inbox" | "list" | "read" | "status" | "wait"
+            action: "list" | "read" | "status" | "wait"
             sessionID?: string
+            messageID?: string
             parent?: string
             search?: string
             project?: string
             limit?: number
-            inboxID?: string
             cursor?: string
             timeout?: number
           }
@@ -473,38 +529,33 @@ export default Plugin.define({
           const self = await ctx.session.get({ sessionID: context.sessionID })
           const projectID = self.projectID
 
-          if (input.action === "inbox") {
-            // Self-cleanup is the common case, so default to the caller.
-            const targetID = input.sessionID ?? context.sessionID
-            await scopedSession("inbox", targetID, input.project, projectID)
-            const items = await client.session.inbox.list({ sessionID: targetID })
-            const cancelled: string[] = []
-            if (input.inboxID === "all") {
-              for (const item of items) {
-                await client.session.inbox.cancel({ sessionID: targetID, inboxID: item.id })
-                cancelled.push(item.id)
-              }
-            } else if (input.inboxID) {
-              await client.session.inbox.cancel({ sessionID: targetID, inboxID: input.inboxID })
-              cancelled.push(input.inboxID)
-            }
-            // Re-list after cancelling so the caller sees the cleaned slate.
-            const pending = cancelled.length > 0 ? await client.session.inbox.list({ sessionID: targetID }) : items
-            return {
-              content: JSON.stringify({
-                session: targetID,
-                cancelled,
-                pending: pending.map((item) => ({
-                  id: item.id,
-                  type: item.type,
-                  delivery: item.delivery,
-                  ...inboxFacts(item),
-                })),
-              }),
-            }
-          }
-
           if (input.action === "list") {
+            // With a sessionID, list that session's messages: triage
+            // previews plus message IDs, for follow-up full reads.
+            if (input.sessionID) {
+              await scopedSession("list", input.sessionID, input.project, projectID)
+              // The API rejects `cursor` combined with `order`: the cursor
+              // already encodes order and direction. Take the pinned tail
+              // (desc) for a fresh list and follow the cursor when paging.
+              const { data, cursor } = await client.message.list({
+                sessionID: input.sessionID,
+                limit: input.limit ?? DEFAULT_LIMIT,
+                ...(input.cursor ? { cursor: input.cursor } : { order: "desc" }),
+              })
+              // Oldest-first for readability.
+              const messages = data
+                .map((message) => previewRow(message))
+                .filter((row): row is NonNullable<typeof row> => row != null)
+                .reverse()
+              return {
+                content: JSON.stringify({
+                  session: input.sessionID,
+                  messages,
+                  // Opaque cursor for the next (older) page, when history remains.
+                  next: cursor?.next ?? null,
+                }),
+              }
+            }
             // Scope relative to the calling session: "my" children, "parent"
             // siblings, "all" recent sessions of the (chosen) project, or an
             // explicit session ID as parent.
@@ -547,28 +598,24 @@ export default Plugin.define({
           }
 
           if (input.action === "read") {
-            if (!input.sessionID) throw new Error("team query read: sessionID is required")
+            if (!input.sessionID || !input.messageID) {
+              throw new Error("team query read: sessionID and messageID are required")
+            }
             await scopedSession("read", input.sessionID, input.project, projectID)
-            // The API rejects `cursor` combined with `order`: the cursor
-            // already encodes order and direction. Take the pinned tail
-            // (desc) for a fresh read and follow the cursor when paging.
-            const { data, cursor } = await client.message.list({
-              sessionID: input.sessionID,
-              limit: input.limit ?? DEFAULT_LIMIT,
-              ...(input.cursor ? { cursor: input.cursor } : { order: "desc" }),
-            })
-            // Oldest-first for readability.
-            const lines = data
-              .map((message) => describe(message))
-              .filter((line): line is string => line != null)
-              .reverse()
+            // The promise client lacks message.get; fetch the message raw
+            // from the same loopback endpoint the client was built from.
+            const { endpoint } = await connect()
+            const response = await fetch(
+              `${endpoint.url}/api/session/${encodeURIComponent(input.sessionID)}/message/${encodeURIComponent(input.messageID)}`,
+              { headers: Service.headers(endpoint) },
+            )
+            if (!response.ok) {
+              const why = response.status === 404 ? "message not found" : `HTTP ${response.status}`
+              throw new Error(`team query read: ${why} (${input.messageID} in ${input.sessionID})`)
+            }
+            const message = (await response.json()) as SessionMessageInfo
             return {
-              content: JSON.stringify({
-                session: input.sessionID,
-                messages: lines,
-                // Opaque cursor for the next (older) page, when history remains.
-                next: cursor?.next ?? null,
-              }),
+              content: JSON.stringify({ session: input.sessionID, message: fullRow(message) }),
             }
           }
 

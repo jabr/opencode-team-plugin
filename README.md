@@ -57,7 +57,7 @@ await tools.team.spawn({ title: "Isolated task", kind: "child", worktree: { name
 - Root sessions have no parent/sibling addressing or parent lifecycle coupling.
   Creator provenance is recorded separately in session metadata under `team.spawn`.
 - No automatic completion messages, cancellation propagation, or result collection.
-  Coordinate using `team_send` and `team_query` read/status/wait.
+  Coordinate using `team_send` and `team_query` list/read/status/wait.
 
 Success returns JSON with `ok`, `sessionID`, actual `directory`, `started`, and
 optional `worktree: { directory }` and `inboxID`. `started: true` means task
@@ -112,16 +112,18 @@ Sending to your own session is refused.
 
 Inspect, search, and monitor sibling/child sessions. Actions:
 
-- **inbox** — list a session's pending inbox items (defaults to the caller);
-  `inboxID` cancels one, `"all"` cancels every pending item.
-- **list** — find sessions: `parent: "my"` (default — this session's
-  children), `parent: "parent"` (siblings), `parent: "roots"` (unarchived
-  top-level sessions across the project's checkouts/worktrees), `parent: "all"`
-  (recent sessions), or a session ID; `search` filters by title. Results include
-  `directory`. Root selection, title search, and archive filtering happen on
-  the server before pagination.
-- **read** — tail a session's messages (compact summaries, oldest-first);
-  `cursor` pages further back using the response's `next`.
+- **list** — two enumeration modes. **Sessions**: `parent: "my"` (default —
+  this session's children), `parent: "parent"` (siblings), `parent: "roots"`
+  (unarchived top-level sessions across the project's checkouts/worktrees),
+  `parent: "all"` (recent sessions), or a session ID; `search` filters by title.
+  Results include `directory`. Root selection, title search, and archive
+  filtering happen on the server before pagination. **Messages**: with
+  `sessionID`, that session's messages — compact triage previews (~200-char
+  heads) with message IDs, oldest-first; `cursor` pages further back using the
+  response's `next`.
+- **read** — one message in full: `sessionID` + `messageID` (IDs come from a
+  `list` response). Unlike the truncated list previews, this returns the
+  complete message, whitespace preserved.
 - **status** — whether a session is running or blocked (`"permission"` /
   `"form"` ask pending — busy but cannot progress); omit `sessionID` for
   every running session in the scoped project.
@@ -158,8 +160,8 @@ Expandable viewing requires frontend support. Older messages remain unchanged.
 This applies to both `team_send` and initial tasks from `team_spawn`.
 
 There is no polling loop: an agent that wants replies reads its own history
-with `team_query` `read`, optionally after `team_query` `wait`. Pending
-messages are inspectable and cancellable with `team_query` `inbox`.
+with `team_query` `list` (full text of any message via `team_query` `read`),
+optionally after `team_query` `wait`.
 
 ## TUI commands
 
