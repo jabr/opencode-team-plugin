@@ -32,44 +32,6 @@ path:
 
 ## Tools
 
-### `team_spawn`
-
-Create a persistent, independent top-level session by default. This makes it
-available in the normal session list; it does **not** switch the UI or open a
-terminal. Use `kind: "child"` to attach a fresh child to the calling session.
-This complements, rather than replaces, built-in `subagent`.
-
-```ts
-await tools.team.spawn({ title: "Review deployment", text: "Review the deployment plan." })
-await tools.team.spawn({ title: "Scratch session" }) // idle, no model turn
-await tools.team.spawn({ title: "Isolated task", kind: "child", worktree: { name: "isolated" } })
-```
-
-- `title` is required and must not be blank.
-- `agent` and `model: { providerID, id, variant? }` are optional; omission
-  preserves normal configured defaults, not the caller's selections.
-- `text` admits an initial task asynchronously through the same synthetic
-  agent-message protocol as `team_send`. No transcript is copied or forked.
-- Without `worktree`, use the caller's actual directory. With `worktree: { name? }`,
-  create through OpenCode's configured strategy, from the caller's checkout
-  (resolved from project worktree inventory, including callers in subdirectories).
-  Starting branches and selecting existing checkouts are not exposed.
-- Root sessions have no parent/sibling addressing or parent lifecycle coupling.
-  Creator provenance is recorded separately in session metadata under `team.spawn`.
-- No automatic completion messages, cancellation propagation, or result collection.
-  Coordinate using `team_send` and `team_query` list/read/status/wait.
-
-Success returns JSON with `ok`, `sessionID`, actual `directory`, `started`, and
-optional `worktree: { directory }` and `inboxID`. `started: true` means task
-**admission**, not completion. Partial failures return `ok: false`, `stage`,
-`error`, and any known resource IDs/paths. Transport failures may leave admission
-uncertain. When a session exists, recovery attempts a bounded location refresh:
-`directoryStatus: "refreshed"` means the directory was read again;
-`"last-known"` means that read failed and the reported directory is uncertain.
-A pending move may still change the location after a refresh.
-Inspect retained resources before retrying; neither sessions nor
-worktrees are automatically deleted. Worktrees persist independently of sessions.
-
 ### `team_send`
 
 Send a message to another agent session in this project. The message is
@@ -107,6 +69,44 @@ project. Role addressing (`parent`/`siblings`/`children`) is inherently
 same-project.
 
 Sending to your own session is refused.
+
+### `team_spawn`
+
+Create a persistent, independent top-level session by default. This makes it
+available in the normal session list; it does **not** switch the UI or open a
+terminal. Use `kind: "child"` to attach a fresh child to the calling session.
+This complements, rather than replaces, built-in `subagent`.
+
+```ts
+await tools.team.spawn({ title: "Review deployment", text: "Review the deployment plan." })
+await tools.team.spawn({ title: "Scratch session" }) // idle, no model turn
+await tools.team.spawn({ title: "Isolated task", kind: "child", worktree: { name: "isolated" } })
+```
+
+- `title` is required and must not be blank.
+- `agent` and `model: { providerID, id, variant? }` are optional; omission
+  preserves normal configured defaults, not the caller's selections.
+- `text` admits an initial task asynchronously through the same synthetic
+  agent-message protocol as `team_send`. No transcript is copied or forked.
+- Without `worktree`, use the caller's actual directory. With `worktree: { name? }`,
+  create through OpenCode's configured strategy, from the caller's checkout
+  (resolved from project worktree inventory, including callers in subdirectories).
+  Starting branches and selecting existing checkouts are not exposed.
+- Root sessions have no parent/sibling addressing or parent lifecycle coupling.
+  Creator provenance is recorded separately in session metadata under `team.spawn`.
+- No automatic completion messages, cancellation propagation, or result collection.
+  Coordinate using `team_send` and `team_query` list/read/status/wait.
+
+Success returns JSON with `ok`, `sessionID`, actual `directory`, `started`, and
+optional `worktree: { directory }` and `inboxID`. `started: true` means task
+**admission**, not completion. Partial failures return `ok: false`, `stage`,
+`error`, and any known resource IDs/paths. Transport failures may leave admission
+uncertain. When a session exists, recovery attempts a bounded location refresh:
+`directoryStatus: "refreshed"` means the directory was read again;
+`"last-known"` means that read failed and the reported directory is uncertain.
+A pending move may still change the location after a refresh.
+Inspect retained resources before retrying; neither sessions nor
+worktrees are automatically deleted. Worktrees persist independently of sessions.
 
 ### `team_query`
 
